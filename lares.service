@@ -1,0 +1,20 @@
+[Unit]
+Description=Lares - Household Guardian AI
+After=network.target docker.service
+Wants=docker.service
+
+[Service]
+Type=simple
+User=daniele
+WorkingDirectory=/home/daniele/workspace/lares
+Environment=PATH=/home/daniele/workspace/lares/.venv/bin:/usr/bin:/bin
+ExecStartPre=/usr/bin/docker start letta
+ExecStartPre=/bin/sleep 10
+ExecStart=/home/daniele/workspace/lares/.venv/bin/python /home/daniele/workspace/lares/run.py
+Restart=always
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

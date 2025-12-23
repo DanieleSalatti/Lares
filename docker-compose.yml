@@ -1,0 +1,13 @@
+services:
+  letta:
+    image: letta/letta:latest
+    ports:
+      - "8283:8283"
+    volumes:
+      - letta-data:/var/lib/postgresql/data
+    environment:
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
+    restart: unless-stopped
+
+volumes:
+  letta-data:

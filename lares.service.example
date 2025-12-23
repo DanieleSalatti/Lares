@@ -1,0 +1,20 @@
+[Unit]
+Description=Lares - Household Guardian AI
+After=network.target docker.service
+Wants=docker.service
+
+[Service]
+Type=simple
+# Replace YOUR_USER with your username
+User=YOUR_USER
+# Replace with your lares installation path
+WorkingDirectory=/path/to/lares
+Environment=PATH=/path/to/lares/.venv/bin:/usr/bin:/bin
+ExecStartPre=/usr/bin/docker start letta
+ExecStartPre=/bin/sleep 10
+ExecStart=/path/to/lares/.venv/bin/python /path/to/lares/run.py
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
