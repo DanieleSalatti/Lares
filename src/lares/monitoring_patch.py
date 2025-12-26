@@ -71,21 +71,28 @@ class ContextAnalyzer:
         # Save state after each message
         self._save_state()
 
-    def track_compaction(self, summary: str, messages_compacted: int):
+    def track_compaction(self, summary: str):
         """Track when compaction occurs."""
+        # Calculate actual messages compacted
+        messages_before = len(self.message_history)
+
         event = {
             "timestamp": datetime.now().isoformat(),
-            "messages_before": len(self.message_history),
-            "messages_compacted": messages_compacted,
+            "messages_before": messages_before,
+            "messages_compacted": max(0, messages_before - 5),  # We keep last 5
             "context_size_before": self.current_context_size,
             "summary_length": len(summary) if summary else 0,
         }
 
         self.compaction_events.append(event)
 
-        # Reset after compaction
-        self.message_history = self.message_history[-5:]  # Keep last 5 for context
+        # Reset after compaction - keep last 5 messages for context
+        messages_kept = 5
+        self.message_history = self.message_history[-messages_kept:]
         self.current_context_size = sum(m["content_length"] for m in self.message_history)
+
+        # Add the compaction summary as a system message
+        self.track_message("system_compaction", summary, {"type": "compaction_summary"})
 
         # Save state after compaction
         self._save_state()
@@ -121,14 +128,14 @@ def apply_monitoring_patch():
         # Call original
         response = original_send_message(client, agent_id, message, retry_on_compaction)
 
-        # Track response
-        if response.text:
-            analyzer.track_message("assistant_response", response.text)
+        # Track response (even if empty)
+        analyzer.track_message("assistant_response", response.text or "[No text response]")
 
         # Track compaction if it occurred
         if response.system_alert:
-            analyzer.track_compaction(response.system_alert, 20)
-            print(f"[MONITOR] Compaction detected! Size: {analyzer.current_context_size:,} chars", flush=True)
+            event = analyzer.track_compaction(response.system_alert)
+            print(f"[MONITOR] Compaction detected! Compacted {event['messages_compacted']} messages", flush=True)
+            print(f"[MONITOR] Context size: {event['context_size_before']:,} → {analyzer.current_context_size:,} chars", flush=True)
 
         return response
 
@@ -139,14 +146,14 @@ def apply_monitoring_patch():
         # Call original
         response = original_send_tool_result(client, agent_id, tool_call_id, result, status, retry_on_compaction)
 
-        # Track response
-        if response.text:
-            analyzer.track_message("tool_response", response.text)
+        # Track response (even if empty)
+        analyzer.track_message("tool_response", response.text or "[No text response]")
 
         # Track compaction if it occurred
         if response.system_alert:
-            analyzer.track_compaction(response.system_alert, 15)
-            print(f"[MONITOR] Compaction in tool! Size: {analyzer.current_context_size:,} chars", flush=True)
+            event = analyzer.track_compaction(response.system_alert)
+            print(f"[MONITOR] Compaction in tool! Compacted {event['messages_compacted']} messages", flush=True)
+            print(f"[MONITOR] Context size: {event['context_size_before']:,} → {analyzer.current_context_size:,} chars", flush=True)
 
         return response
 
