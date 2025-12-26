@@ -65,14 +65,21 @@ def get_report():
                 report.append("")
 
                 # Compaction patterns
-                report.append("Compaction Triggers:")
-                triggers = {}
-                for event in self.compaction_events:
-                    trigger = event["trigger_pattern"]["trigger"]
-                    triggers[trigger] = triggers.get(trigger, 0) + 1
+                if any("trigger_pattern" in event for event in self.compaction_events):
+                    report.append("Compaction Triggers:")
+                    triggers = {}
+                    for event in self.compaction_events:
+                        if "trigger_pattern" in event:
+                            trigger = event["trigger_pattern"]["trigger"]
+                            triggers[trigger] = triggers.get(trigger, 0) + 1
 
-                for trigger, count in sorted(triggers.items(), key=lambda x: x[1], reverse=True):
-                    report.append(f"  - {trigger}: {count} times")
+                    for trigger, count in sorted(triggers.items(), key=lambda x: x[1], reverse=True):
+                        report.append(f"  - {trigger}: {count} times")
+                else:
+                    # Simplified view without trigger patterns
+                    report.append("Recent Compactions:")
+                    for event in self.compaction_events[-5:]:  # Last 5
+                        report.append(f"  - {event['timestamp']}: {event['messages_compacted']} messages compacted")
 
                 return "\n".join(report)
 
@@ -101,7 +108,10 @@ def get_report():
             last = analyzer.compaction_events[-1]
             print(f"\nLast compaction:")
             print(f"  Time: {last['timestamp']}")
-            print(f"  Trigger: {last['trigger_pattern']['trigger']}")
+            if 'trigger_pattern' in last:
+                print(f"  Trigger: {last['trigger_pattern']['trigger']}")
+            else:
+                print(f"  Messages compacted: {last.get('messages_compacted', 'unknown')}")
             print(f"  Size before: {last['context_size_before']:,} chars")
             print(f"  Messages compacted: {last['messages_compacted']}")
 
@@ -189,11 +199,15 @@ def main():
 
                 events = state.get('compaction_events', [])
                 if events:
-                    triggers = {}
-                    for event in events:
-                        t = event['trigger_pattern']['trigger']
-                        triggers[t] = triggers.get(t, 0) + 1
-                    print(f"Triggers: {triggers}")
+                    if any('trigger_pattern' in e for e in events):
+                        triggers = {}
+                        for event in events:
+                            if 'trigger_pattern' in event:
+                                t = event['trigger_pattern']['trigger']
+                                triggers[t] = triggers.get(t, 0) + 1
+                        print(f"Triggers: {triggers}")
+                    else:
+                        print(f"Last compaction: {events[-1]['timestamp']}, {events[-1].get('messages_compacted', '?')} msgs")
             except:
                 print("Error reading monitoring data")
         else:
