@@ -8,7 +8,7 @@ import structlog
 from letta_client import Letta
 
 from lares.config import ToolsConfig
-from lares.obsidian import search_notes as obsidian_search_notes
+from lares.obsidian import read_note as obsidian_read_note, search_notes as obsidian_search_notes
 from lares.tools import (
     CommandNotAllowedError,
     FileBlockedError,
@@ -230,6 +230,12 @@ class ToolExecutor:
                     arguments.get("query", ""),
                     arguments.get("max_results", 10),
                 )
+            elif tool_name == "read_obsidian_note":
+                path = arguments.get("path", "")
+                log.info("read_obsidian_note_called", path=path, args=arguments)
+                result = self._read_obsidian_note(path)
+                log.info("read_obsidian_note_result", path=path, result_len=len(result), result_preview=result[:100] if result else None)
+                return result
             else:
                 return f"Unknown tool: {tool_name}"
         except Exception as e:
@@ -410,6 +416,13 @@ class ToolExecutor:
     def _search_obsidian_notes(self, query: str, max_results: int) -> str:
         """Search notes in the Obsidian vault."""
         return obsidian_search_notes(query, max_results=max_results)
+
+    def _read_obsidian_note(self, path: str) -> str:
+        """Read a specific note from the Obsidian vault."""
+        log.info("_read_obsidian_note_wrapper", path=path)
+        result = obsidian_read_note(path)
+        log.info("_read_obsidian_note_wrapper_result", path=path, result_len=len(result) if result else 0, result_preview=result[:100] if result else None)
+        return result
 
 
 # Tool definitions for Letta registration
@@ -672,6 +685,22 @@ def search_obsidian_notes(query: str, max_results: int = 10) -> str:
     """
     raise Exception("Client-side tool")
 ''',
+    "read_obsidian_note": '''
+def read_obsidian_note(path: str) -> str:
+    """
+    Read a specific note from the Obsidian vault.
+
+    Use this to read the full content of a note found via search,
+    or to access a known note by path.
+
+    Args:
+        path: Path to the note relative to vault root (e.g., "Diario/2025/01/2025-01-12.md")
+
+    Returns:
+        The full content of the note, or an error message if not found
+    """
+    raise Exception("Client-side tool")
+''',
 }
 
 
@@ -679,23 +708,45 @@ def register_tools_with_letta(client: Letta, agent_id: str) -> list[str]:
     """
     Register client-side tools with a Letta agent.
 
-    Tools are created with defaultRequiresApproval=True so execution
-    pauses and returns to us for local execution.
+    Tools are created with defaultRequiresApproval based on whether they
+    need user approval or can be auto-executed.
 
     Returns list of registered tool names.
     """
     log.info("registering_tools", agent_id=agent_id)
+
+    # Whitelist of tools that DON'T need user approval (auto-executed)
+    TOOLS_NOT_REQUIRING_USER_APPROVAL = {
+        "run_command",  # Has internal allowlist + Discord approval workflow
+        "post_to_bluesky",  # Has Discord approval workflow
+        "discord_send_message",
+        "discord_react",
+        "read_file",
+        "write_file",
+        "schedule_job",
+        "remove_job",
+        "list_jobs",
+        "read_rss_feed",
+        "read_bluesky_user",
+        "search_bluesky",
+        "search_obsidian_notes",
+        "read_obsidian_note",
+        "restart_lares",
+    }
 
     registered: list[str] = []
     tool_ids: list[str] = []
 
     for name, source_code in TOOL_SOURCES.items():
         try:
+            # Tools NOT in whitelist require approval (safer default)
+            needs_approval = name not in TOOLS_NOT_REQUIRING_USER_APPROVAL
+
             tool = client.tools.upsert(
                 source_code=source_code,
-                default_requires_approval=True,
+                default_requires_approval=needs_approval,
             )
-            log.info("tool_registered", name=name, tool_id=tool.id)
+            log.info("tool_registered", name=name, tool_id=tool.id, requires_approval=needs_approval)
             registered.append(name)
             tool_ids.append(tool.id)
         except Exception as e:

@@ -322,6 +322,8 @@ Available tools:
 - read_bluesky_user(handle, limit): Read posts from a BlueSky user
 - search_bluesky(query, limit): Search BlueSky posts
 - post_to_bluesky(text): Post to BlueSky (requires approval)
+- search_obsidian_notes(query, max_results): Search notes in Obsidian vault
+- read_obsidian_note(path): Read a specific note from Obsidian
 - restart_lares(): Restart yourself to apply updates or configuration changes
 - create_tool(source_code): Create new tools to extend your capabilities (requires approval)
 

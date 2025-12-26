@@ -10,6 +10,8 @@ import sys
 from datetime import datetime
 from typing import Any, Dict, List
 import json
+import subprocess
+import re
 
 
 class ContextAnalyzer:
@@ -20,6 +22,7 @@ class ContextAnalyzer:
         self.message_history: List[Dict[str, Any]] = []
         self.compaction_events: List[Dict[str, Any]] = []
         self.current_context_size = 0
+        self.letta_state_file = os.path.expanduser("~/.lares/letta_context.json")
 
         # Create directory if needed
         os.makedirs(os.path.dirname(self.state_file), exist_ok=True)
@@ -98,6 +101,88 @@ class ContextAnalyzer:
         self._save_state()
 
         return event
+
+    def fetch_letta_context(self, agent_id: str):
+        """Fetch Letta's actual message history and token count."""
+        try:
+            import requests
+
+            # First get the agent to see which messages are in context
+            agent_response = requests.get(f"http://localhost:8283/v1/agents/{agent_id}")
+
+            if agent_response.status_code != 200:
+                print(f"[MONITOR] Failed to get agent info: {agent_response.status_code}")
+                return None
+
+            agent_data = agent_response.json()
+            context_message_ids = set(agent_data.get("message_ids", []))
+
+            # Get all messages (we need to fetch them to filter)
+            response = requests.get(
+                f"http://localhost:8283/v1/agents/{agent_id}/messages",
+                params={"limit": 500}  # Get more to ensure we have all context messages
+            )
+
+            if response.status_code == 200:
+                all_messages = response.json()
+
+                # Filter to only messages in the current context
+                messages = [msg for msg in all_messages if msg.get("id") in context_message_ids]
+
+                # Count message types
+                type_counts = {}
+                for msg in messages:
+                    msg_type = msg.get("message_type", msg.get("role", "unknown"))
+                    type_counts[msg_type] = type_counts.get(msg_type, 0) + 1
+
+                # Get token count from docker logs
+                token_count = self._get_letta_token_count()
+
+                letta_data = {
+                    "timestamp": datetime.now().isoformat(),
+                    "message_count": len(messages),
+                    "total_messages_in_db": len(all_messages),
+                    "messages_in_context": len(context_message_ids),
+                    "message_types": type_counts,
+                    "token_estimate": token_count,
+                    "messages_sample": messages[:5] if messages else []  # First 5 for inspection
+                }
+
+                # Save Letta state
+                with open(self.letta_state_file, 'w') as f:
+                    json.dump(letta_data, f, indent=2)
+
+                return letta_data
+            else:
+                print(f"[MONITOR] Failed to fetch Letta messages: {response.status_code}")
+                return None
+
+        except Exception as e:
+            print(f"[MONITOR] Error fetching Letta context: {e}")
+            return None
+
+    def _get_letta_token_count(self):
+        """Extract the latest token count from Letta logs."""
+        try:
+            result = subprocess.run(
+                ["docker", "logs", "letta", "--tail", "100"],
+                capture_output=True,
+                text=True
+            )
+
+            # Find the last token estimate
+            matches = re.findall(
+                r"Context token estimate after .*?: (\d+)",
+                result.stderr
+            )
+
+            if matches:
+                return int(matches[-1])
+            return None
+
+        except Exception as e:
+            print(f"[MONITOR] Error getting token count: {e}")
+            return None
 
 
 def apply_monitoring_patch():

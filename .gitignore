@@ -55,3 +55,6 @@ htmlcov/
 .letta/
 .lares/
 lares_export.af
+
+# Agent backups (may contain sensitive memory)
+backups/

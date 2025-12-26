@@ -32,6 +32,7 @@ def get_report():
     """Get the memory report from the context analyzer."""
     # Load state from file
     state_file = os.path.expanduser("~/.lares/context_analysis.json")
+    letta_file = os.path.expanduser("~/.lares/letta_context.json")
 
     if not os.path.exists(state_file):
         print("❌ No monitoring data found. Make sure:")
@@ -90,16 +91,72 @@ def get_report():
         print("LARES MEMORY COMPACTION REPORT")
         print(f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
         print("=" * 60)
-        print()
+
+        # Show OUR tracking
+        print("\n📊 OUR TRACKING (what we intercept):")
+        print("-" * 40)
+        print(f"Messages tracked: {len(analyzer.message_history)}")
+        print(f"Context size: {analyzer.current_context_size:,} chars")
+
+        # Count our message types
+        our_types = {}
+        for msg in analyzer.message_history:
+            t = msg.get('type', 'unknown')
+            our_types[t] = our_types.get(t, 0) + 1
+
+        print("Message types:")
+        for msg_type, count in sorted(our_types.items()):
+            print(f"  - {msg_type}: {count}")
+
+        # Show Letta's view if available
+        if os.path.exists(letta_file):
+            try:
+                with open(letta_file, 'r') as f:
+                    letta_data = json.load(f)
+
+                print("\n🔍 LETTA'S VIEW (actual context):")
+                print("-" * 40)
+                print(f"Messages in history: {letta_data.get('message_count', 'unknown')}")
+                print(f"Estimated tokens: {letta_data.get('token_estimate', 'unknown'):,}" if letta_data.get('token_estimate') else "Estimated tokens: unknown")
+
+                if letta_data.get('message_types'):
+                    print("Message types:")
+                    for msg_type, count in sorted(letta_data['message_types'].items()):
+                        print(f"  - {msg_type}: {count}")
+
+                # Show discrepancy analysis
+                if letta_data.get('message_count'):
+                    our_count = len(analyzer.message_history)
+                    letta_count = letta_data['message_count']
+                    hidden = letta_count - our_count
+
+                    print("\n⚠️  DISCREPANCY ANALYSIS:")
+                    print("-" * 40)
+                    print(f"Hidden messages: {hidden} ({hidden*100//letta_count}% of total)")
+
+                    if letta_data.get('token_estimate') and analyzer.current_context_size > 0:
+                        char_per_token = analyzer.current_context_size / letta_data['token_estimate']
+                        print(f"Chars per token (our view): {char_per_token:.2f}")
+
+                    print(f"Last Letta update: {letta_data.get('timestamp', 'unknown')}")
+
+            except Exception as e:
+                print(f"\n⚠️  Could not load Letta data: {e}")
+        else:
+            print("\n💡 TIP: Update Letta context with: python -c \"from lares.memory import _context_analyzer; _context_analyzer.fetch_letta_context('agent-id')\"")
+
+        print("\n" + "=" * 60)
+        print("COMPACTION HISTORY")
+        print("=" * 60)
 
         # Print the report
         print(analyzer.generate_report())
 
         # Print additional live stats
         print("\n" + "=" * 60)
-        print("LIVE STATS")
+        print("CURRENT STATUS")
         print("=" * 60)
-        print(f"Current context size: {analyzer.current_context_size:,} chars")
+        print(f"Our context size: {analyzer.current_context_size:,} chars")
         print(f"Messages tracked: {len(analyzer.message_history)}")
         print(f"Total compactions: {len(analyzer.compaction_events)}")
 
