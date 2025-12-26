@@ -8,7 +8,8 @@ import structlog
 from letta_client import Letta
 
 from lares.config import ToolsConfig
-from lares.obsidian import read_note as obsidian_read_note, search_notes as obsidian_search_notes
+from lares.obsidian import read_note as obsidian_read_note
+from lares.obsidian import search_notes as obsidian_search_notes
 from lares.tools import (
     CommandNotAllowedError,
     FileBlockedError,
@@ -234,7 +235,8 @@ class ToolExecutor:
                 path = arguments.get("path", "")
                 log.info("read_obsidian_note_called", path=path, args=arguments)
                 result = self._read_obsidian_note(path)
-                log.info("read_obsidian_note_result", path=path, result_len=len(result), result_preview=result[:100] if result else None)
+                log.info("read_obsidian_note_result", path=path, result_len=len(result),
+                    result_preview=result[:100] if result else None)
                 return result
             else:
                 return f"Unknown tool: {tool_name}"
@@ -421,7 +423,8 @@ class ToolExecutor:
         """Read a specific note from the Obsidian vault."""
         log.info("_read_obsidian_note_wrapper", path=path)
         result = obsidian_read_note(path)
-        log.info("_read_obsidian_note_wrapper_result", path=path, result_len=len(result) if result else 0, result_preview=result[:100] if result else None)
+        log.info("_obsidian_read_result", path=path, result_len=len(result) if result else 0,
+                result_preview=result[:100] if result else None)
         return result
 
 
@@ -716,7 +719,7 @@ def register_tools_with_letta(client: Letta, agent_id: str) -> list[str]:
     log.info("registering_tools", agent_id=agent_id)
 
     # Whitelist of tools that DON'T need user approval (auto-executed)
-    TOOLS_NOT_REQUIRING_USER_APPROVAL = {
+    tools_not_requiring_approval = {
         "run_command",  # Has internal allowlist + Discord approval workflow
         "post_to_bluesky",  # Has Discord approval workflow
         "discord_send_message",
@@ -740,13 +743,15 @@ def register_tools_with_letta(client: Letta, agent_id: str) -> list[str]:
     for name, source_code in TOOL_SOURCES.items():
         try:
             # Tools NOT in whitelist require approval (safer default)
-            needs_approval = name not in TOOLS_NOT_REQUIRING_USER_APPROVAL
+            needs_approval = name not in tools_not_requiring_approval
 
             tool = client.tools.upsert(
                 source_code=source_code,
                 default_requires_approval=needs_approval,
             )
-            log.info("tool_registered", name=name, tool_id=tool.id, requires_approval=needs_approval)
+            log.info(
+                "tool_registered", name=name, tool_id=tool.id, requires_approval=needs_approval
+            )
             registered.append(name)
             tool_ids.append(tool.id)
         except Exception as e:

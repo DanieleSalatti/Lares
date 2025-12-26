@@ -50,7 +50,7 @@ async def run() -> None:
                 sys.path.insert(0, project_root)
 
             from tests.test_context_analysis import instrument_memory_module
-            analyzer = instrument_memory_module()
+            analyzer = instrument_memory_module()  # noqa: F841 - kept for future use
             log.info("context_monitoring_enabled")
         except ImportError as e:
             log.warning("context_monitoring_failed", error=str(e))

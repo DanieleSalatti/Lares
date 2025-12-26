@@ -5,13 +5,12 @@ This module MUST be imported before any other lares modules to work correctly.
 It patches the memory module functions before they can be imported elsewhere.
 """
 
-import os
-import sys
-from datetime import datetime
-from typing import Any, Dict, List
 import json
-import subprocess
+import os
 import re
+import subprocess
+from datetime import datetime
+from typing import Any
 
 
 class ContextAnalyzer:
@@ -19,8 +18,8 @@ class ContextAnalyzer:
 
     def __init__(self, state_file: str = None):
         self.state_file = state_file or os.path.expanduser("~/.lares/context_analysis.json")
-        self.message_history: List[Dict[str, Any]] = []
-        self.compaction_events: List[Dict[str, Any]] = []
+        self.message_history: list[dict[str, Any]] = []
+        self.compaction_events: list[dict[str, Any]] = []
         self.current_context_size = 0
         self.letta_state_file = os.path.expanduser("~/.lares/letta_context.json")
 
@@ -34,7 +33,7 @@ class ContextAnalyzer:
         """Load state from file if it exists."""
         if os.path.exists(self.state_file):
             try:
-                with open(self.state_file, 'r') as f:
+                with open(self.state_file) as f:
                     state = json.load(f)
                     self.message_history = state.get('message_history', [])
                     self.compaction_events = state.get('compaction_events', [])
@@ -58,7 +57,7 @@ class ContextAnalyzer:
         except Exception as e:
             print(f"[MONITOR] Failed to save state: {e}")
 
-    def track_message(self, message_type: str, content: str, metadata: Dict = None):
+    def track_message(self, message_type: str, content: str, metadata: dict = None):
         """Track a message added to context."""
         entry = {
             "timestamp": datetime.now().isoformat(),
@@ -207,7 +206,8 @@ def apply_monitoring_patch():
 
     # Create instrumented versions
     def instrumented_send_message(client, agent_id, message, retry_on_compaction=True):
-        print(f"[MONITOR] send_message called: {message[:50] if message else 'None'}...", flush=True)
+        msg_preview = message[:50] if message else "None"
+        print(f"[MONITOR] send_message called: {msg_preview}...", flush=True)
         analyzer.track_message("user_message", message)
 
         # Call original
@@ -219,17 +219,24 @@ def apply_monitoring_patch():
         # Track compaction if it occurred
         if response.system_alert:
             event = analyzer.track_compaction(response.system_alert)
-            print(f"[MONITOR] Compaction detected! Compacted {event['messages_compacted']} messages", flush=True)
-            print(f"[MONITOR] Context size: {event['context_size_before']:,} → {analyzer.current_context_size:,} chars", flush=True)
+            print(f"[MONITOR] Compaction detected! "
+              f"Compacted {event['messages_compacted']} messages", flush=True)
+            ctx_before = event["context_size_before"]
+            ctx_after = analyzer.current_context_size
+            print(f"[MONITOR] Context size: {ctx_before:,} → {ctx_after:,} chars", flush=True)
 
         return response
 
-    def instrumented_send_tool_result(client, agent_id, tool_call_id, result, status="success", retry_on_compaction=True):
+    def instrumented_send_tool_result(
+        client, agent_id, tool_call_id, result, status="success", retry_on_compaction=True
+    ):
         print(f"[MONITOR] send_tool_result called: tool={tool_call_id[:20]}", flush=True)
         analyzer.track_message("tool_result", result, {"tool_id": tool_call_id[:20]})
 
         # Call original
-        response = original_send_tool_result(client, agent_id, tool_call_id, result, status, retry_on_compaction)
+        response = original_send_tool_result(
+            client, agent_id, tool_call_id, result, status, retry_on_compaction
+        )
 
         # Track response (even if empty)
         analyzer.track_message("tool_response", response.text or "[No text response]")
@@ -237,8 +244,11 @@ def apply_monitoring_patch():
         # Track compaction if it occurred
         if response.system_alert:
             event = analyzer.track_compaction(response.system_alert)
-            print(f"[MONITOR] Compaction in tool! Compacted {event['messages_compacted']} messages", flush=True)
-            print(f"[MONITOR] Context size: {event['context_size_before']:,} → {analyzer.current_context_size:,} chars", flush=True)
+            print(f"[MONITOR] Compaction in tool! "
+              f"Compacted {event['messages_compacted']} messages", flush=True)
+            ctx_before = event["context_size_before"]
+            ctx_after = analyzer.current_context_size
+            print(f"[MONITOR] Context size: {ctx_before:,} → {ctx_after:,} chars", flush=True)
 
         return response
 
