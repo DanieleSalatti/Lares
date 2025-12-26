@@ -8,6 +8,7 @@ import structlog
 from letta_client import Letta
 
 from lares.config import ToolsConfig
+from lares.obsidian import search_notes as obsidian_search_notes
 from lares.tools import (
     CommandNotAllowedError,
     FileBlockedError,
@@ -224,6 +225,11 @@ class ToolExecutor:
                 return await self._discord_react(arguments.get("emoji", ""))
             elif tool_name == "restart_lares":
                 return await self._restart_lares()
+            elif tool_name == "search_obsidian_notes":
+                return self._search_obsidian_notes(
+                    arguments.get("query", ""),
+                    arguments.get("max_results", 10),
+                )
             else:
                 return f"Unknown tool: {tool_name}"
         except Exception as e:
@@ -400,6 +406,10 @@ class ToolExecutor:
     async def _restart_lares(self) -> str:
         """Restart the Lares service."""
         return await restart_lares()
+
+    def _search_obsidian_notes(self, query: str, max_results: int) -> str:
+        """Search notes in the Obsidian vault."""
+        return obsidian_search_notes(query, max_results=max_results)
 
 
 # Tool definitions for Letta registration
@@ -642,6 +652,23 @@ def restart_lares() -> str:
 
     Returns:
         Success message (though you'll restart before seeing it)
+    """
+    raise Exception("Client-side tool")
+''',
+    "search_obsidian_notes": '''
+def search_obsidian_notes(query: str, max_results: int = 10) -> str:
+    """
+    Search for notes in the Obsidian vault containing the query string.
+
+    Use this to find relevant notes, discover connections between topics,
+    or look up information from past notes.
+
+    Args:
+        query: Text to search for (case-insensitive)
+        max_results: Maximum number of matching notes to return (default 10)
+
+    Returns:
+        Formatted string with matching notes and context snippets
     """
     raise Exception("Client-side tool")
 ''',
