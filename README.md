@@ -17,6 +17,7 @@ Inspired by [Strix](https://timkellogg.me/blog/2025/12/15/strix), Lares is an am
 - **Scheduled Tasks**: Set reminders and recurring jobs with flexible scheduling
 - **Self-Management**: Can restart itself for updates and maintenance
 - **Tool System**: File operations, shell commands, RSS feeds, BlueSky integration, and more
+- **Skills System**: Procedural memory through markdown files - teaches Lares how to perform tasks
 - **Extensible**: Designed for adding new interfaces (Telegram, web) and capabilities
 
 ## Quick Start
@@ -249,6 +250,21 @@ Lares uses four memory blocks:
 | `human` | Information about you |
 | `state` | Current working memory and tasks |
 | `ideas` | Feature ideas and future plans |
+
+### Skills (Procedural Memory)
+
+Skills are markdown files that teach Lares how to perform specific tasks. Inspired by [Letta Code's skill learning](https://www.letta.com/blog/skill-learning), they provide:
+
+- **Persistent procedural knowledge** that survives context resets
+- **On-demand loading** - only loaded when needed (context-efficient)
+- **Learn from experience** - new skills created after successful task completion
+
+Example skills in `examples/skills/`:
+- `git-workflow.md` - Version control patterns
+- `perch-tick.md` - Autonomous time decision framework  
+- `discord-interaction.md` - Communication patterns
+
+Skills are indexed in Lares's persona (lightweight pointers) and loaded via `read_file` when performing related tasks.
 
 ### Available Tools
 
