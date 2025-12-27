@@ -335,7 +335,7 @@ This software is licensed under the PolyForm Noncommercial License 1.0.0, a mode
 - ❌ **NOT free as a service** - Cannot host or offer as SaaS
 
 ### Why this license?
-Lares is a labor of love meant to empower individuals, not enrich corporations. The PolyForm Noncommercial license provides crystal-clear terms that prevent any commercial exploitation while keeping the software freely available for personal, educational, and charitable use.
+Lares is a labor of love meant to empower individuals. The PolyForm Noncommercial license provides crystal-clear terms that prevent any commercial exploitation while keeping the software freely available for personal, educational, and charitable use.
 
 See [LICENSE](LICENSE) for full terms.
 
