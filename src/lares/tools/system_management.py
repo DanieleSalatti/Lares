@@ -1,8 +1,10 @@
 """System management tools for Lares self-management."""
 
 import asyncio
+import os
 import subprocess
 
+import aiohttp
 import structlog
 
 log = structlog.get_logger()
@@ -28,15 +30,19 @@ async def restart_lares() -> str:
     """
     log.info("restart_lares_requested")
 
-    # Import here to avoid circular dependency
-    from lares.tools.discord import send_message
+    mcp_url = os.getenv("LARES_MCP_URL", "http://localhost:8765")
 
     try:
-        # Send a goodbye message to Discord first
-        await send_message(
-            "🔄 Restarting now... I'll be back in a moment!", reply=False
-        )
-        log.info("restart_goodbye_sent")
+        # Send a goodbye message to Discord via MCP HTTP endpoint
+        async with aiohttp.ClientSession() as session:
+            async with session.post(
+                f"{mcp_url}/discord/send",
+                json={"content": "🔄 Restarting now... I'll be back in a moment!"}
+            ) as resp:
+                if resp.status == 200:
+                    log.info("restart_goodbye_sent")
+                else:
+                    log.warning("restart_goodbye_failed", status=resp.status)
 
         # Give Discord a moment to send the message
         await asyncio.sleep(1)
@@ -84,12 +90,9 @@ async def restart_mcp() -> str:
     """
     log.info("restart_mcp_requested")
 
-    try:
-        # Import here to avoid circular dependency
-        # Restart MCP server (this is quick, we can wait for it)
-        import subprocess
+    mcp_url = os.getenv("LARES_MCP_URL", "http://localhost:8765")
 
-        from lares.tools.discord import send_message
+    try:
         result = subprocess.run(
             ["sudo", "systemctl", "restart", "lares-mcp.service"],
             capture_output=True,
@@ -99,7 +102,12 @@ async def restart_mcp() -> str:
 
         if result.returncode == 0:
             log.info("restart_mcp_completed")
-            await send_message("🔄 MCP server restarted successfully!", reply=False)
+            # Send success message via MCP HTTP endpoint
+            async with aiohttp.ClientSession() as session:
+                await session.post(
+                    f"{mcp_url}/discord/send",
+                    json={"content": "🔄 MCP server restarted successfully!"}
+                )
             return "MCP server restarted successfully! ✅"
         else:
             error_msg = result.stderr or "Unknown error"

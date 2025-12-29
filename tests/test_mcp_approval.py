@@ -105,3 +105,47 @@ class TestApprovalQueue:
 
         assert item is not None
         assert item["tool"] == "persistent_tool"
+
+
+class TestRememberedCommands:
+    """Tests for the remembered commands functionality."""
+
+    def test_add_remembered_command(self, queue: ApprovalQueue):
+        """Test adding a command to remembered patterns."""
+        pattern = queue.add_remembered_command("beans list --all", approved_by="daniele")
+        assert pattern == "beans"
+
+    def test_extract_pattern_simple_command(self, queue: ApprovalQueue):
+        """Test pattern extraction from simple commands."""
+        queue.add_remembered_command("curl http://localhost:8765/health")
+        assert queue.is_command_remembered("curl http://other.server/api")
+
+    def test_extract_pattern_full_path(self, queue: ApprovalQueue):
+        """Test pattern extraction from full path commands."""
+        queue.add_remembered_command("/home/daniele/go/bin/beans list")
+        assert queue.is_command_remembered("beans status")
+        assert queue.is_command_remembered("/home/daniele/go/bin/beans other")
+
+    def test_is_command_remembered_false(self, queue: ApprovalQueue):
+        """Test that non-remembered commands return False."""
+        assert not queue.is_command_remembered("unknown_command arg1")
+
+    def test_get_remembered_commands(self, queue: ApprovalQueue):
+        """Test listing remembered commands."""
+        queue.add_remembered_command("pip install something", approved_by="daniele")
+        queue.add_remembered_command("npm run build", approved_by="daniele")
+        
+        patterns = queue.get_remembered_commands()
+        assert len(patterns) == 2
+        pattern_names = [p["pattern"] for p in patterns]
+        assert "pip" in pattern_names
+        assert "npm" in pattern_names
+
+    def test_remove_remembered_command(self, queue: ApprovalQueue):
+        """Test removing a remembered pattern."""
+        queue.add_remembered_command("docker compose up")
+        assert queue.is_command_remembered("docker ps")
+        
+        removed = queue.remove_remembered_command("docker")
+        assert removed
+        assert not queue.is_command_remembered("docker ps")

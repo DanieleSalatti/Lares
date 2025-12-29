@@ -13,8 +13,15 @@ Approval endpoints:
   POST /approvals/{id}/approve    - Approve and execute
   POST /approvals/{id}/deny       - Deny request
   GET  /health                    - Health check
+
+Discord endpoints:
+  GET  /events                    - SSE stream of Discord events
+  POST /discord/send              - Send a message
+  POST /discord/react             - React to a message
+  POST /discord/typing            - Trigger typing indicator
 """
 
+import asyncio
 import json
 import os
 import subprocess
@@ -23,9 +30,11 @@ import urllib.request
 from datetime import UTC, datetime
 from pathlib import Path
 
+import discord
+from discord.ext import commands
 from mcp.server import FastMCP
 from starlette.requests import Request
-from starlette.responses import JSONResponse
+from starlette.responses import JSONResponse, StreamingResponse
 
 from lares.mcp_approval import get_queue
 
@@ -54,13 +63,131 @@ _bsky_session_cache: dict = {}
 # Initialize approval queue
 approval_queue = get_queue(APPROVAL_DB)
 
+# === DISCORD INTEGRATION ===
+
+# Discord configuration
+DISCORD_TOKEN = os.getenv("DISCORD_BOT_TOKEN", "")
+DISCORD_CHANNEL_ID = int(os.getenv("DISCORD_CHANNEL_ID", "0"))
+DISCORD_ENABLED = bool(DISCORD_TOKEN and DISCORD_CHANNEL_ID)
+
+# Event queues for SSE clients (Lares Core connects here)
+_event_queues: list[asyncio.Queue] = []
+
+# Discord bot state
+_discord_bot: commands.Bot | None = None
+_discord_channel: discord.TextChannel | None = None
+
+
+async def push_event(event_type: str, data: dict) -> None:
+    """Push event to all connected SSE clients."""
+    event = {
+        "event": event_type,
+        "data": data,
+        "timestamp": datetime.now(UTC).isoformat(),
+    }
+    for queue in _event_queues:
+        try:
+            queue.put_nowait(event)
+        except asyncio.QueueFull:
+            pass  # Skip if queue is full
+
+
+def setup_discord_bot() -> commands.Bot | None:
+    """Initialize Discord bot if enabled."""
+    if not DISCORD_ENABLED:
+        return None
+
+    intents = discord.Intents.default()
+    intents.message_content = True
+    intents.reactions = True
+    bot = commands.Bot(command_prefix="!", intents=intents)
+
+    @bot.event
+    async def on_ready():
+        global _discord_channel
+        _discord_channel = bot.get_channel(DISCORD_CHANNEL_ID)
+        if _discord_channel:
+            print(f"Discord connected to #{_discord_channel.name}")
+        else:
+            print(f"Warning: Could not find channel {DISCORD_CHANNEL_ID}")
+
+    @bot.event
+    async def on_message(message: discord.Message):
+        # Ignore own messages
+        if message.author == bot.user:
+            return
+
+        # Only messages in target channel
+        if message.channel.id != DISCORD_CHANNEL_ID:
+            return
+
+        # Push to SSE clients
+        await push_event(
+            "discord_message",
+            {
+                "message_id": str(message.id),
+                "channel_id": str(message.channel.id),
+                "author_id": str(message.author.id),
+                "author_name": message.author.name,
+                "content": message.content,
+                "timestamp": message.created_at.isoformat(),
+            },
+        )
+
+    @bot.event
+    async def on_raw_reaction_add(payload: discord.RawReactionActionEvent):
+        # Ignore own reactions
+        if payload.user_id == bot.user.id:
+            return
+
+        message_id = str(payload.message_id)
+        emoji = str(payload.emoji)
+
+        # Push all reactions to SSE - Lares handles approval logic via API calls
+        await push_event(
+            "discord_reaction",
+            {
+                "message_id": message_id,
+                "channel_id": str(payload.channel_id),
+                "user_id": str(payload.user_id),
+                "emoji": emoji,
+            },
+        )
+
+    return bot
+
+# Initialize Discord bot
+_discord_bot = setup_discord_bot()
+
 # Commands that can run without approval (prefix match)
 SHELL_ALLOWLIST = [
-    "echo ", "ls", "cat ", "head ", "tail ", "wc ", "grep ",  # Read-only
-    "git status", "git log", "git diff", "git branch", "git show",  # Git read
-    "git add", "git commit", "git push", "git pull", "git checkout",  # Git write
-    "pytest", "python -m pytest", "ruff check", "ruff format", "mypy",  # Dev tools
-    "pwd", "whoami", "date", "env", "which ",  # System info
+    "echo ",
+    "ls",
+    "cat ",
+    "head ",
+    "tail ",
+    "wc ",
+    "grep ",  # Read-only
+    "git status",
+    "git log",
+    "git diff",
+    "git branch",
+    "git show",  # Git read
+    "git add",
+    "git commit",
+    "git push",
+    "git pull",
+    "git checkout",  # Git write
+    "pytest",
+    "python -m pytest",
+    "ruff check",
+    "ruff format",
+    "mypy",  # Dev tools
+    "pwd",
+    "whoami",
+    "date",
+    "env",
+    "which ",  # System info
 ]
 # Set to True to require approval for all shell commands
 SHELL_REQUIRE_ALL_APPROVAL = os.getenv("MCP_SHELL_REQUIRE_APPROVAL", "").lower() == "true"
@@ -114,6 +241,29 @@ def _get_bsky_auth_token() -> str | None:
 # === APPROVAL HTTP ENDPOINTS ===
 
 
+@mcp.custom_route("/approvals", methods=["POST"])
+async def create_approval(request: Request) -> JSONResponse:
+    """Create a new approval request (used by ToolExecutor for commands needing approval)."""
+    try:
+        data = await request.json()
+        tool = data.get("tool")
+        args = data.get("args")
+
+        if not tool or args is None:
+            return JSONResponse({"error": "Missing tool or args"}, status_code=400)
+
+        # Parse args if it's a string
+        if isinstance(args, str):
+            args = json.loads(args)
+
+        # Submit to approval queue
+        approval_id = approval_queue.submit(tool, args)
+
+        return JSONResponse({"id": approval_id, "status": "pending"})
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
 @mcp.custom_route("/approvals/pending", methods=["GET"])
 async def get_pending_approvals(request: Request) -> JSONResponse:
     """Get all pending approval requests."""
@@ -124,6 +274,13 @@ async def get_pending_approvals(request: Request) -> JSONResponse:
         except Exception:
             pass
     return JSONResponse({"pending": pending})
+
+
+@mcp.custom_route("/approvals/remembered", methods=["GET"])
+async def list_remembered(request: Request) -> JSONResponse:
+    """List all remembered command patterns."""
+    patterns = approval_queue.get_remembered_commands()
+    return JSONResponse({"patterns": patterns})
 
 
 @mcp.custom_route("/approvals/{approval_id}", methods=["GET"])
@@ -156,9 +313,17 @@ async def approve_request(request: Request) -> JSONResponse:
     tool_name = item["tool"]
     args = json.loads(item["args"])
 
+    # Execute using internal functions (bypass approval check)
     try:
-        result = await mcp.call_tool(tool_name, args)
-        result_str = str(result)
+        if tool_name == "run_shell_command":
+            result_str = _execute_shell_command(args["command"], args.get("working_dir", str(LARES_PROJECT)))
+        elif tool_name == "post_to_bluesky":
+            result_str = _execute_bluesky_post(args["text"])
+        else:
+            # Fallback for other tools (shouldn't happen often)
+            result = await mcp.call_tool(tool_name, args)
+            result_str = str(result)
+
         approval_queue.set_result(approval_id, result_str)
         return JSONResponse({"status": "approved", "result": result_str})
     except Exception as e:
@@ -182,6 +347,48 @@ async def deny_request(request: Request) -> JSONResponse:
     return JSONResponse({"status": "denied"})
 
 
+@mcp.custom_route("/approvals/{approval_id}/remember", methods=["POST"])
+async def approve_and_remember(request: Request) -> JSONResponse:
+    """Approve and remember the command pattern for future auto-approval."""
+    approval_id = request.path_params["approval_id"]
+    item = approval_queue.get(approval_id)
+
+    if not item:
+        return JSONResponse({"error": "Approval not found"}, status_code=404)
+    if item["status"] != "pending":
+        return JSONResponse({"error": f"Already {item['status']}"}, status_code=400)
+
+    # Only works for shell commands
+    if item["tool"] != "run_shell_command":
+        return JSONResponse(
+            {"error": "Remember only supported for shell commands"}, status_code=400
+        )
+
+    args = item["args"]
+    if isinstance(args, str):
+        args = json.loads(args)
+
+    command = args.get("command", "")
+    cwd = args.get("working_dir") or str(LARES_PROJECT)
+
+    # Add to remembered patterns
+    pattern = approval_queue.add_remembered_command(command, approved_by="discord")
+
+    # Approve the request
+    approval_queue.approve(approval_id)
+
+    # Execute the command using internal function
+    result_str = _execute_shell_command(command, cwd)
+    approval_queue.set_result(approval_id, result_str)
+    return JSONResponse(
+        {
+            "status": "approved_and_remembered",
+            "pattern": pattern,
+            "result": result_str,
+        }
+    )
+
+
 @mcp.custom_route("/health", methods=["GET"])
 async def health_check(request: Request) -> JSONResponse:
     """Health check endpoint."""
@@ -192,6 +399,159 @@ async def health_check(request: Request) -> JSONResponse:
             "pending_approvals": len(approval_queue.get_pending()),
         }
     )
+
+
+@mcp.custom_route("/events", methods=["GET"])
+async def events_endpoint(request: Request) -> StreamingResponse:
+    """SSE endpoint for Lares Core to receive events (messages, reactions, etc.)."""
+    queue: asyncio.Queue = asyncio.Queue(maxsize=100)
+    _event_queues.append(queue)
+
+    async def event_generator():
+        try:
+            while True:
+                event = await queue.get()
+                event_type = event.get("event", "message")
+                data = event.get("data", {})
+                # Proper SSE format: event type on separate line
+                yield f"event: {event_type}\ndata: {json.dumps(data)}\n\n"
+        except asyncio.CancelledError:
+            pass
+        finally:
+            if queue in _event_queues:
+                _event_queues.remove(queue)
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+        },
+    )
+
+
+
+# === DISCORD HTTP ENDPOINTS ===
+
+
+@mcp.custom_route("/discord/send", methods=["POST"])
+async def http_discord_send(request: Request) -> JSONResponse:
+    """HTTP endpoint for Lares to send Discord messages.
+    
+    Body: {"content": "message text", "reply_to": "optional_message_id"}
+    """
+    try:
+        body = await request.json()
+        content = body.get("content")
+        reply_to = body.get("reply_to")
+
+        if not content:
+            return JSONResponse({"error": "content is required"}, status_code=400)
+
+        if not _discord_channel:
+            return JSONResponse({"error": "Discord not connected"}, status_code=503)
+
+        if reply_to:
+            msg = await _discord_channel.fetch_message(int(reply_to))
+            sent = await msg.reply(content)
+        else:
+            sent = await _discord_channel.send(content)
+
+        return JSONResponse({
+            "status": "ok",
+            "message_id": str(sent.id)
+        })
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
+@mcp.custom_route("/discord/react", methods=["POST"])
+async def http_discord_react(request: Request) -> JSONResponse:
+    """HTTP endpoint for Lares to add reactions to Discord messages.
+    
+    Body: {"message_id": "12345", "emoji": "👀"}
+    """
+    try:
+        body = await request.json()
+        message_id = body.get("message_id")
+        emoji = body.get("emoji")
+
+        if not message_id or not emoji:
+            return JSONResponse(
+                {"error": "message_id and emoji are required"},
+                status_code=400
+            )
+
+        if not _discord_channel:
+            return JSONResponse({"error": "Discord not connected"}, status_code=503)
+
+        msg = await _discord_channel.fetch_message(int(message_id))
+        await msg.add_reaction(emoji)
+
+        return JSONResponse({"status": "ok", "emoji": emoji})
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
+@mcp.custom_route("/discord/typing", methods=["POST"])
+async def http_discord_typing(request: Request) -> JSONResponse:
+    """HTTP endpoint to trigger Discord typing indicator.
+    
+    Typing indicator lasts ~10 seconds or until a message is sent.
+    """
+    try:
+        if not _discord_channel:
+            return JSONResponse({"error": "Discord not connected"}, status_code=503)
+
+        await _discord_channel.typing()
+        return JSONResponse({"status": "ok"})
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
+# === DISCORD TOOLS ===
+
+
+@mcp.tool()
+async def discord_send_message(content: str, reply_to: str | None = None) -> str:
+    """Send a message to the Discord channel.
+
+    Args:
+        content: The message text to send
+        reply_to: Optional message ID to reply to
+    """
+    if not _discord_channel:
+        return "Error: Discord not connected"
+
+    try:
+        if reply_to:
+            msg = await _discord_channel.fetch_message(int(reply_to))
+            await msg.reply(content)
+        else:
+            await _discord_channel.send(content)
+        return "Message sent successfully"
+    except Exception as e:
+        return f"Error sending message: {e}"
+
+
+@mcp.tool()
+async def discord_react(message_id: str, emoji: str) -> str:
+    """React to a Discord message with an emoji.
+
+    Args:
+        message_id: The ID of the message to react to
+        emoji: The emoji to react with (e.g., "👀", "✅", "👍")
+    """
+    if not _discord_channel:
+        return "Error: Discord not connected"
+
+    try:
+        msg = await _discord_channel.fetch_message(int(message_id))
+        await msg.add_reaction(emoji)
+        return f"Reacted with {emoji}"
+    except Exception as e:
+        return f"Error adding reaction: {e}"
 
 
 # === FILE TOOLS ===
@@ -243,41 +603,32 @@ def write_file(path: str, content: str) -> str:
         return f"Error writing file: {e}"
 
 
-
 def is_shell_command_allowed(command: str) -> bool:
     """Check if a shell command can run without approval."""
     if SHELL_REQUIRE_ALL_APPROVAL:
         return False
     cmd_lower = command.strip().lower()
-    return any(cmd_lower.startswith(allowed.lower()) for allowed in SHELL_ALLOWLIST)
+
+    # Check static allowlist
+    if any(cmd_lower.startswith(allowed.lower()) for allowed in SHELL_ALLOWLIST):
+        return True
+
+    # Check remembered patterns (from 🔓 approvals)
+    if approval_queue.is_command_remembered(command):
+        return True
+
+    return False
 
 
 # === SHELL TOOL ===
 
 
-@mcp.tool()
-def run_shell_command(command: str, working_dir: str | None = None) -> str:
-    """Execute a shell command. Non-allowlisted commands require approval."""
-    if working_dir and not is_path_allowed(working_dir):
-        return f"Error: Working directory not allowed: {working_dir}"
 
-    cwd = working_dir or str(LARES_PROJECT)
-
-    # Check if command needs approval
-    if not is_shell_command_allowed(command):
-        approval_id = approval_queue.submit(
-            "run_shell_command",
-            {"command": command, "working_dir": cwd}
-        )
-        return (
-            f"⏳ Command requires approval. ID: {approval_id}\n"
-            f"Poll GET /approvals/{approval_id} for status."
-        )
-
-    # Allowed command - run directly
+def _execute_shell_command(command: str, working_dir: str) -> str:
+    """Internal: Execute shell command without approval check."""
     try:
         result = subprocess.run(
-            command, shell=True, cwd=cwd, capture_output=True, text=True, timeout=60
+            command, shell=True, cwd=working_dir, capture_output=True, text=True, timeout=60
         )
         output = result.stdout
         if result.stderr:
@@ -287,6 +638,35 @@ def run_shell_command(command: str, working_dir: str | None = None) -> str:
         return "Error: Command timed out after 60 seconds"
     except Exception as e:
         return f"Error running command: {e}"
+
+
+@mcp.tool()
+async def run_shell_command(command: str, working_dir: str | None = None) -> str:
+    """Execute a shell command. Non-allowlisted commands require approval."""
+    if working_dir and not is_path_allowed(working_dir):
+        return f"Error: Working directory not allowed: {working_dir}"
+
+    cwd = working_dir or str(LARES_PROJECT)
+
+    # Check if command needs approval
+    if not is_shell_command_allowed(command):
+        approval_id = approval_queue.submit(
+            "run_shell_command", {"command": command, "working_dir": cwd}
+        )
+        # Emit SSE event for approval notification
+        await push_event("approval_needed", {
+            "id": approval_id,
+            "tool": "run_shell_command",
+            "command": command,
+            "working_dir": cwd,
+        })
+        return (
+            f"⏳ Command requires approval. ID: {approval_id}\n"
+            f"Approval request sent via SSE."
+        )
+
+    # Allowed command - run directly
+    return _execute_shell_command(command, cwd)
 
 
 # === RSS TOOL ===
@@ -395,14 +775,8 @@ def search_bluesky(query: str, limit: int = 10) -> str:
         return f"Error searching BlueSky: {e}"
 
 
-@mcp.tool()
-def post_to_bluesky(text: str) -> str:
-    """Post a message to BlueSky. Requires approval in production mode."""
-    if len(text) > 300:
-        return f"Error: Post too long ({len(text)} chars). Maximum is 300."
-    if not text.strip():
-        return "Error: Post text cannot be empty."
-
+def _execute_bluesky_post(text: str, retry: bool = True) -> str:
+    """Internal: Execute BlueSky post without approval check."""
     auth_token = _get_bsky_auth_token()
     if not auth_token:
         return "Error: Auth required. Set BLUESKY_HANDLE and BLUESKY_APP_PASSWORD"
@@ -436,9 +810,34 @@ def post_to_bluesky(text: str) -> str:
         return f"✅ Posted to BlueSky!\nURI: {result.get('uri')}"
     except urllib.error.HTTPError as e:
         _bsky_session_cache.clear()
+        # Retry once with fresh token on 400/401 (likely expired token)
+        if retry and e.code in (400, 401):
+            return _execute_bluesky_post(text, retry=False)
         return f"Error: HTTP {e.code} - {e.reason}"
     except Exception as e:
         return f"Error posting to BlueSky: {e}"
+
+
+@mcp.tool()
+async def post_to_bluesky(text: str) -> str:
+    """Post a message to BlueSky. Requires approval."""
+    if len(text) > 300:
+        return f"Error: Post too long ({len(text)} chars). Maximum is 300."
+    if not text.strip():
+        return "Error: Post text cannot be empty."
+
+    # BlueSky posts always require approval
+    approval_id = approval_queue.submit("post_to_bluesky", {"text": text})
+    # Emit SSE event for approval notification
+    await push_event("approval_needed", {
+        "id": approval_id,
+        "tool": "post_to_bluesky",
+        "text": text,
+    })
+    return (
+        f"🦋 BlueSky post queued for approval. ID: {approval_id}\n"
+        f"Approval request sent via SSE."
+    )
 
 
 # === OBSIDIAN TOOLS ===
@@ -506,10 +905,65 @@ def read_obsidian_note(path: str) -> str:
 
 # === ENTRY POINT ===
 
+
+async def run_with_discord():
+    """Run MCP server with Discord bot."""
+    import signal
+
+    import uvicorn
+
+    # Start Discord bot in background if enabled
+    discord_task = None
+    if _discord_bot:
+        print("Starting Discord bot...")
+        discord_task = asyncio.create_task(_discord_bot.start(DISCORD_TOKEN))
+
+    # Create uvicorn config with install_signal_handlers=False (we handle them)
+    config = uvicorn.Config(
+        mcp.sse_app(),
+        host="0.0.0.0",
+        port=8765,
+        log_level="info",
+    )
+    server = uvicorn.Server(config)
+
+    # Handle SIGTERM/SIGINT gracefully
+    loop = asyncio.get_running_loop()
+    stop_event = asyncio.Event()
+
+    def handle_signal():
+        print("Received shutdown signal...")
+        stop_event.set()
+        server.should_exit = True
+
+    for sig in (signal.SIGTERM, signal.SIGINT):
+        loop.add_signal_handler(sig, handle_signal)
+
+    try:
+        await server.serve()
+    finally:
+        print("Shutting down Discord...")
+        if discord_task:
+            discord_task.cancel()
+            try:
+                await discord_task
+            except asyncio.CancelledError:
+                pass
+        if _discord_bot:
+            await _discord_bot.close()
+        print("Shutdown complete.")
+
+
 if __name__ == "__main__":
     print("Starting Lares MCP Server on http://0.0.0.0:8765")
     print("Tools: read_file, list_directory, write_file, run_shell_command")
     print("       read_rss_feed, read_bluesky_user, search_bluesky, post_to_bluesky")
     print("       search_obsidian_notes, read_obsidian_note")
-    print("Endpoints: /health, /approvals/pending, /approvals/{id}")
-    mcp.run(transport="sse")
+    print("       discord_send_message, discord_react")
+    print("Endpoints: /health, /events, /approvals/pending, /approvals/{id}")
+    if DISCORD_ENABLED:
+        print(f"Discord: enabled (channel {DISCORD_CHANNEL_ID})")
+        asyncio.run(run_with_discord())
+    else:
+        print("Discord: disabled (set DISCORD_BOT_TOKEN and DISCORD_CHANNEL_ID)")
+        mcp.run(transport="sse")

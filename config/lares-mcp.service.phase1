@@ -1,0 +1,28 @@
+# Phase 1: MCP Server with Discord I/O
+# This service handles ALL external I/O (Discord, HTTP API, approvals)
+#
+# Changes from current:
+# - Added EnvironmentFile to load Discord credentials
+# - Discord bot will start alongside MCP server
+# - SSE endpoint provides events to Lares core
+
+[Unit]
+Description=Lares MCP Server - I/O Layer (Discord + Tools + Approvals)
+After=network.target
+Before=lares.service
+
+[Service]
+Type=simple
+User=daniele
+WorkingDirectory=/home/daniele/workspace/lares
+Environment=PATH=/home/daniele/workspace/lares/.venv/bin:/usr/bin:/bin
+# Load Discord credentials from .env
+EnvironmentFile=/home/daniele/workspace/lares/.env
+ExecStart=/home/daniele/workspace/lares/.venv/bin/python -m lares.mcp_server
+Restart=always
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

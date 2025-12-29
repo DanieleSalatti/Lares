@@ -3,6 +3,7 @@
 import asyncio
 from typing import Any
 
+import aiohttp
 import discord
 import structlog
 from letta_client import Letta
@@ -156,11 +157,13 @@ class ToolExecutor:
         letta_client: Letta | None = None,
         agent_id: str | None = None,
         discord_channel: discord.TextChannel | None = None,
+        mcp_url: str | None = None,
     ):
         self.config = tools_config
         self.letta_client = letta_client
         self.agent_id = agent_id
         self.channel = discord_channel
+        self.mcp_url = mcp_url
 
     def set_channel(self, channel: discord.TextChannel) -> None:
         """Set the Discord channel for approval requests."""
@@ -170,6 +173,28 @@ class ToolExecutor:
         """Set the Letta client and agent ID for tool creation."""
         self.letta_client = client
         self.agent_id = agent_id
+
+    async def _request_mcp_approval(self, tool_name: str, args: dict) -> str:
+        """Submit a tool call to MCP approval queue."""
+        import json
+        log.info("requesting_mcp_approval", tool=tool_name)
+
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.post(
+                    f"{self.mcp_url}/approvals",
+                    json={"tool": tool_name, "args": json.dumps(args)}
+                ) as resp:
+                    if resp.status == 200:
+                        data = await resp.json()
+                        approval_id = data.get("id", "unknown")
+                        return f"⏳ Queued for approval (ID: {approval_id}). React ✅ to approve or ❌ to deny."
+                    else:
+                        error = await resp.text()
+                        return f"Failed to queue approval: {error}"
+        except Exception as e:
+            log.error("mcp_approval_request_failed", error=str(e))
+            return f"Failed to request approval: {e}"
 
     async def execute(self, tool_name: str, arguments: dict[str, Any]) -> str:
         """Execute a tool and return the result as a string for Letta."""
@@ -263,7 +288,14 @@ class ToolExecutor:
             return output
 
         except CommandNotAllowedError:
-            # Request approval
+            # Request approval via MCP queue if available
+            if self.mcp_url:
+                return await self._request_mcp_approval(
+                    "run_shell_command",
+                    {"command": command, "working_dir": str(working_dir)}
+                )
+
+            # Fall back to old Discord channel approach
             if self.channel is None:
                 return f"Command not allowed and no Discord channel for approval: {command}"
 
@@ -392,12 +424,20 @@ class ToolExecutor:
 
     async def _post_to_bluesky(self, text: str) -> str:
         """Post to BlueSky with approval workflow."""
+        log.info("requesting_bluesky_approval", text_length=len(text))
+
+        # Use MCP approval queue if available
+        if self.mcp_url:
+            return await self._request_mcp_approval(
+                "post_to_bluesky",
+                {"text": text}
+            )
+
+        # Fall back to old Discord channel approach
         if self.channel is None:
             return "Error: No Discord channel available for BlueSky post approval"
 
-        log.info("requesting_bluesky_approval", text_length=len(text))
-
-        # Request approval
+        # Request approval via Discord
         message = await request_bluesky_approval(self.channel, text)
 
         return (

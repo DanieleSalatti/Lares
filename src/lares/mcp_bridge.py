@@ -4,7 +4,7 @@ MCP Approval Bridge - Connects MCP approval queue to Discord.
 This component:
 1. Polls the MCP server for pending approvals
 2. Sends approval requests to Discord
-3. Handles reactions to approve/deny
+3. Handles reactions to approve/deny/remember
 4. Calls back to MCP with the decision
 
 Can be integrated into main Lares process or run standalone.
@@ -94,11 +94,17 @@ class MCPApprovalBridge:
         if len(args_str) > 500:
             args_str = args_str[:500] + "\n..."
 
+        # Add 🔓 option for shell commands
+        if pending.tool in ("run_shell_command", "run_command"):
+            react_help = "React ✅ approve once, 🔓 approve & remember, ❌ deny"
+        else:
+            react_help = "React ✅ to approve, ❌ to deny"
+
         return (
             f"🔒 **Approval Required** [`{pending.approval_id}`]\n"
             f"**Tool:** `{pending.tool}`\n"
             f"```json\n{args_str}\n```\n"
-            f"React ✅ to approve, ❌ to deny"
+            f"{react_help}"
         )
 
     def track_message(self, approval_id: str, message_id: int):
@@ -108,7 +114,11 @@ class MCPApprovalBridge:
             self.message_to_approval[message_id] = approval_id
 
     def handle_reaction(self, message_id: int, emoji: str) -> tuple[str, str, str, str] | None:
-        """Handle a reaction. Returns (approval_id, status) or None."""
+        """
+        Handle a reaction. Returns (approval_id, status, tool, result_text) or None.
+
+        Status can be: "approved", "denied", "approved_and_remembered"
+        """
         approval_id = self.message_to_approval.get(message_id)
         if not approval_id:
             return None
@@ -120,6 +130,14 @@ class MCPApprovalBridge:
         if emoji == "✅":
             result = self._mcp_request(f"/approvals/{approval_id}/approve", "POST")
             status = "approved"
+        elif emoji == "🔓":
+            result = self._mcp_request(f"/approvals/{approval_id}/remember", "POST")
+            if result and result.get("status") == "approved_and_remembered":
+                status = "approved_and_remembered"
+            else:
+                # Fallback if remember fails (e.g., non-shell command)
+                result = self._mcp_request(f"/approvals/{approval_id}/approve", "POST")
+                status = "approved"
         elif emoji == "❌":
             result = self._mcp_request(f"/approvals/{approval_id}/deny", "POST")
             status = "denied"
@@ -132,10 +150,15 @@ class MCPApprovalBridge:
             del self.message_to_approval[message_id]
 
         result_text = ""
-        if result and "result" in result:
-            result_text = result["result"]
-            if len(result_text) > 500:
-                result_text = result_text[:500] + "\n..."
+        pattern = ""
+        if result:
+            if "result" in result:
+                result_text = result["result"]
+                if len(result_text) > 500:
+                    result_text = result_text[:500] + "\n..."
+            if "pattern" in result:
+                pattern = result["pattern"]
+                status = f"approved_and_remembered (pattern: `{pattern}`)"
 
         return (approval_id, status, pending.tool, result_text)
 

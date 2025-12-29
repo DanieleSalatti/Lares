@@ -1,4 +1,6 @@
 """Tests for MCP approval bridge."""
+from unittest.mock import patch
+import urllib.error
 
 import pytest
 
@@ -72,6 +74,7 @@ class TestMCPApprovalBridge:
 
     def test_health_check_returns_none_when_server_down(self, bridge):
         """Test health check returns None when MCP server not running."""
-        # Default URL points to non-running server
-        result = bridge.health_check()
-        assert result is None
+        # Mock urllib.request.urlopen to simulate connection error
+        with patch("urllib.request.urlopen", side_effect=urllib.error.URLError("Connection refused")):
+            result = bridge.health_check()
+            assert result is None

@@ -1,0 +1,37 @@
+# Phase 1: Lares Core - Orchestration Layer
+# This service handles LLM/memory (via Letta) and orchestration
+#
+# Changes from current:
+# - Depends on lares-mcp.service for I/O
+# - Does NOT run its own Discord bot
+# - Consumes events from MCP server via SSE
+# - Calls tools via MCP HTTP API
+#
+# REQUIRES CODE CHANGES:
+# - New entry point (src/lares/core.py or modify run.py)
+# - SSE event consumer to receive Discord messages
+# - Tool calls go through MCP instead of direct execution
+
+[Unit]
+Description=Lares - Household Guardian AI (Core/Orchestration)
+After=network.target docker.service lares-mcp.service
+Wants=docker.service
+Requires=lares-mcp.service
+
+[Service]
+Type=simple
+User=daniele
+WorkingDirectory=/home/daniele/workspace/lares
+Environment=PATH=/home/daniele/workspace/lares/.venv/bin:/usr/bin:/bin
+EnvironmentFile=/home/daniele/workspace/lares/.env
+ExecStartPre=/usr/bin/docker start letta
+ExecStartPre=/bin/sleep 10
+# TODO: Change to new entry point once code is ready
+ExecStart=/home/daniele/workspace/lares/.venv/bin/python /home/daniele/workspace/lares/run.py
+Restart=always
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

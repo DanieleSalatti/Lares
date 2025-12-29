@@ -1,0 +1,19 @@
+[Unit]
+Description=Lares AI Assistant - Core Brain
+After=network.target lares-mcp.service
+Requires=lares-mcp.service
+
+[Service]
+Type=simple
+User=daniele
+WorkingDirectory=/home/daniele/workspace/lares
+EnvironmentFile=/home/daniele/workspace/lares/.env
+Environment=PATH=/home/daniele/workspace/lares/.venv/bin:/usr/bin:/bin
+ExecStart=/home/daniele/workspace/lares/.venv/bin/python -m lares.main_mcp
+Restart=always
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

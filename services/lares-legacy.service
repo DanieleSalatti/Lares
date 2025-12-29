@@ -1,0 +1,18 @@
+[Unit]
+Description=Lares AI Assistant - Legacy (run.py with built-in Discord)
+After=network.target
+
+[Service]
+Type=simple
+User=daniele
+WorkingDirectory=/home/daniele/workspace/lares
+EnvironmentFile=/home/daniele/workspace/lares/.env
+Environment=PATH=/home/daniele/workspace/lares/.venv/bin:/usr/bin:/bin
+ExecStart=/home/daniele/workspace/lares/.venv/bin/python run.py
+Restart=always
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

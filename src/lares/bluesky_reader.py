@@ -129,7 +129,7 @@ def _clear_session():
 
 def _get_auth_token(force_refresh: bool = False) -> str | None:
     """Get an authentication token, using cached session if available.
-    
+
     Args:
         force_refresh: If True, ignore cache and re-authenticate
     """
@@ -329,7 +329,7 @@ def search_posts(query: str, limit: int = 10) -> BlueskyFeedResult:
                     error_msg = f"HTTP {retry_e.code}: {retry_e.reason}"
                     log.error("bluesky_search_http_error_after_retry", query=query, error=error_msg)
                     return BlueskyFeedResult(posts=[], error=error_msg)
-        
+
         error_msg = f"HTTP {e.code}: {e.reason}"
         log.error("bluesky_search_http_error", query=query, error=error_msg)
         return BlueskyFeedResult(posts=[], error=error_msg)
@@ -463,9 +463,9 @@ def create_post(text: str) -> BlueskyPostResult:
                     except Exception:
                         error_body = ""
                     error_msg = f"HTTP {retry_e.code}: {retry_e.reason}"
-                    log.error("bluesky_post_http_error_after_retry", error=error_msg, body=error_body)
+                    log.error("bluesky_post_http_error_retry", error=error_msg, body=error_body)
                     return BlueskyPostResult(success=False, error=f"{error_msg} - {error_body}")
-        
+
         try:
             error_body = e.read().decode("utf-8")
         except Exception:

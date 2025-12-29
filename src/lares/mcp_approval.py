@@ -14,6 +14,39 @@ from typing import Any
 DEFAULT_DB_PATH = Path(__file__).parent.parent.parent / "data" / "approvals.db"
 
 
+def extract_command_pattern(command: str) -> str:
+    """
+    Extract a reusable pattern from a command.
+
+    Strategy: Use the base command (first word, or full path basename).
+    This allows "beans list" to match all "beans *" commands.
+
+    Examples:
+        "beans list" -> "beans"
+        "/home/daniele/go/bin/beans list" -> "beans"
+        "curl http://localhost:8765/health" -> "curl"
+        "python3 -c 'print(1)'" -> "python3"
+    """
+    # Split on whitespace
+    parts = command.strip().split()
+    if not parts:
+        return command
+
+    first = parts[0]
+
+    # If it's a path, extract the basename
+    if "/" in first:
+        first = Path(first).name
+
+    return first
+
+
+def command_matches_pattern(command: str, pattern: str) -> bool:
+    """Check if a command matches a remembered pattern."""
+    cmd_pattern = extract_command_pattern(command)
+    return cmd_pattern.lower() == pattern.lower()
+
+
 class ApprovalQueue:
     """SQLite-backed approval queue for sensitive operations."""
 
@@ -38,6 +71,15 @@ class ApprovalQueue:
             """)
             conn.execute("""
                 CREATE INDEX IF NOT EXISTS idx_status ON approvals(status)
+            """)
+            # New table for remembered command patterns
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS remembered_commands (
+                    pattern TEXT PRIMARY KEY,
+                    original_command TEXT NOT NULL,
+                    approved_by TEXT,
+                    created_at TEXT NOT NULL
+                )
             """)
             conn.commit()
 
@@ -119,6 +161,55 @@ class ApprovalQueue:
                 (f"-{days} days",),
             )
             conn.commit()
+
+    # === REMEMBERED COMMANDS ===
+
+    def add_remembered_command(self, command: str, approved_by: str | None = None) -> str:
+        """
+        Add a command pattern to the remembered list.
+        Returns the pattern that was added.
+        """
+        pattern = extract_command_pattern(command)
+        now = datetime.now(UTC).isoformat()
+
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute(
+                """INSERT OR REPLACE INTO remembered_commands
+                   (pattern, original_command, approved_by, created_at)
+                   VALUES (?, ?, ?, ?)""",
+                (pattern, command, approved_by, now),
+            )
+            conn.commit()
+
+        return pattern
+
+    def is_command_remembered(self, command: str) -> bool:
+        """Check if a command matches any remembered pattern."""
+        pattern = extract_command_pattern(command)
+
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.execute(
+                "SELECT 1 FROM remembered_commands WHERE pattern = ?",
+                (pattern,),
+            )
+            return cursor.fetchone() is not None
+
+    def get_remembered_commands(self) -> list[dict]:
+        """Get all remembered command patterns."""
+        with sqlite3.connect(self.db_path) as conn:
+            conn.row_factory = sqlite3.Row
+            cursor = conn.execute("SELECT * FROM remembered_commands ORDER BY created_at")
+            return [dict(row) for row in cursor.fetchall()]
+
+    def remove_remembered_command(self, pattern: str) -> bool:
+        """Remove a remembered command pattern."""
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.execute(
+                "DELETE FROM remembered_commands WHERE pattern = ?",
+                (pattern,),
+            )
+            conn.commit()
+            return cursor.rowcount > 0
 
 
 # Singleton instance

@@ -2,6 +2,9 @@
   <img src="docs/logo.png" alt="Lares logo" width="250">
 </p>
 
+
+![Stability: Experimental](https://img.shields.io/badge/stability-experimental-red)
+
 # Lares
 
 A stateful AI agent with persistent memory - your household guardian.
