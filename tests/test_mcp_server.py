@@ -1,5 +1,5 @@
 """Tests for MCP server shell allowlist."""
-from unittest.mock import patch, MagicMock
+from unittest.mock import MagicMock, patch
 
 
 def test_shell_allowlist():

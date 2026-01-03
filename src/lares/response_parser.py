@@ -2,6 +2,9 @@
 
 Supports both plain text responses (backwards compatible) and
 structured JSON actions for fine-grained control.
+
+IMPORTANT: When tool calls are present without discord_send_message,
+the response is considered silent (tool-only work).
 """
 
 import json
@@ -18,26 +21,32 @@ class DiscordAction:
     content: str | None = None
 
 
-def parse_response(text: str | None) -> list[DiscordAction]:
+def parse_response(text: str | None, has_tool_calls: bool = False) -> list[DiscordAction]:
     """
     Parse agent response text into a list of Discord actions.
 
     Supports:
-    - Plain text: treated as a reply to the triggering message
+    - Plain text (no tools): treated as a reply to the triggering message
+    - Tool calls without discord_send_message: silent (no Discord message)
+    - Explicit discord_send_message tool: use that message content
     - JSON actions: {"actions": [{"type": "react", "emoji": "👀"}, ...]}
     - JSON in markdown code blocks: ```json {...} ```
 
     Args:
         text: The agent's response text
+        has_tool_calls: Whether the response included tool calls
 
     Returns:
         List of DiscordAction objects to execute in order.
         Empty list if text is None/empty.
-        Single reply action for plain text.
+        Single reply action for plain text (only if no tool calls).
 
     Examples:
         >>> parse_response("Hello!")
         [DiscordAction(type='reply', content='Hello!')]
+
+        >>> parse_response("Internal thought", has_tool_calls=True)
+        []  # Silent because tools were used
 
         >>> parse_response('{"actions": [{"type": "react", "emoji": "👀"}]}')
         [DiscordAction(type='react', emoji='👀')]
@@ -66,7 +75,12 @@ def parse_response(text: str | None) -> list[DiscordAction]:
         if actions:
             return actions
 
-    # Plain text - treat as reply
+    # If tool calls were made but no explicit discord_send_message,
+    # treat as silent work (no Discord output)
+    if has_tool_calls:
+        return []
+
+    # Plain text with no tools - treat as reply (backwards compatible)
     return [DiscordAction(type="reply", content=text)]
 
 

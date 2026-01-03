@@ -58,3 +58,8 @@ lares_export.af
 
 # Agent backups (may contain sensitive memory)
 backups/
+
+# Test and debug files
+test_*.py
+debug_*.py
+fix_*.md

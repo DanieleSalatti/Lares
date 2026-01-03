@@ -1,6 +1,7 @@
 """Tests for SSE event consumer."""
 
 import pytest
+
 from lares.sse_consumer import (
     DiscordMessageEvent,
     DiscordReactionEvent,
@@ -185,8 +186,9 @@ class TestDiscordClient:
 
     @pytest.mark.asyncio
     async def test_send_message_builds_payload(self):
+        from unittest.mock import AsyncMock, MagicMock, patch
+
         from lares.sse_consumer import DiscordClient
-        from unittest.mock import AsyncMock, patch, MagicMock
 
         client = DiscordClient()
 
@@ -214,8 +216,9 @@ class TestDiscordClient:
 
     @pytest.mark.asyncio
     async def test_send_message_with_reply(self):
+        from unittest.mock import AsyncMock, MagicMock, patch
+
         from lares.sse_consumer import DiscordClient
-        from unittest.mock import AsyncMock, patch, MagicMock
 
         client = DiscordClient()
 
@@ -232,7 +235,7 @@ class TestDiscordClient:
         ))
 
         with patch("aiohttp.ClientSession", return_value=mock_session):
-            result = await client.send_message("Reply!", reply_to=123)
+            await client.send_message("Reply!", reply_to=123)
 
         mock_session.post.assert_called_once_with(
             "http://localhost:8765/discord/send",
@@ -241,8 +244,9 @@ class TestDiscordClient:
 
     @pytest.mark.asyncio
     async def test_react_builds_payload(self):
+        from unittest.mock import AsyncMock, MagicMock, patch
+
         from lares.sse_consumer import DiscordClient
-        from unittest.mock import AsyncMock, patch, MagicMock
 
         client = DiscordClient()
 
@@ -266,3 +270,99 @@ class TestDiscordClient:
             "http://localhost:8765/discord/react",
             json={"message_id": "12345", "emoji": "✅"}
         )
+
+
+class TestApprovalResultEvent:
+    """Test approval result event handling."""
+
+    def test_approval_result_event_creation(self):
+        from lares.sse_consumer import ApprovalResultEvent
+
+        event = ApprovalResultEvent(
+            approval_id="abc123",
+            tool="run_shell_command",
+            status="approved",
+            result="Command output here",
+        )
+        assert event.approval_id == "abc123"
+        assert event.tool == "run_shell_command"
+        assert event.status == "approved"
+        assert event.result == "Command output here"
+
+    def test_approval_result_denied(self):
+        from lares.sse_consumer import ApprovalResultEvent
+
+        event = ApprovalResultEvent(
+            approval_id="xyz789",
+            tool="post_to_bluesky",
+            status="denied",
+            result=None,
+        )
+        assert event.status == "denied"
+        assert event.result is None
+
+    def test_register_approval_result_handler(self):
+        consumer = SSEConsumer()
+
+        async def handler(event):
+            pass
+
+        consumer.on_approval_result(handler)
+        assert len(consumer._approval_result_handlers) == 1
+        assert consumer._approval_result_handlers[0] is handler
+
+
+@pytest.mark.asyncio
+class TestApprovalResultDispatch:
+    """Test approval result dispatch logic."""
+
+    async def test_dispatch_approval_result_event(self):
+        from lares.sse_consumer import ApprovalResultEvent
+
+        consumer = SSEConsumer()
+        received_events = []
+
+        async def handler(event: ApprovalResultEvent):
+            received_events.append(event)
+
+        consumer.on_approval_result(handler)
+
+        await consumer._dispatch_event({
+            "event": "approval_result",
+            "data": {
+                "approval_id": "test123",
+                "tool": "run_shell_command",
+                "status": "approved",
+                "result": "success output",
+            },
+        })
+
+        assert len(received_events) == 1
+        assert received_events[0].approval_id == "test123"
+        assert received_events[0].status == "approved"
+        assert received_events[0].result == "success output"
+
+    async def test_dispatch_approval_result_error(self):
+        from lares.sse_consumer import ApprovalResultEvent
+
+        consumer = SSEConsumer()
+        received_events = []
+
+        async def handler(event: ApprovalResultEvent):
+            received_events.append(event)
+
+        consumer.on_approval_result(handler)
+
+        await consumer._dispatch_event({
+            "event": "approval_result",
+            "data": {
+                "approval_id": "err456",
+                "tool": "post_to_bluesky",
+                "status": "error",
+                "result": "API connection failed",
+            },
+        })
+
+        assert len(received_events) == 1
+        assert received_events[0].status == "error"
+        assert "API connection failed" in received_events[0].result

@@ -36,7 +36,6 @@ class DiscordReactionEvent:
     emoji: str
 
 
-
 @dataclass
 class ApprovalEvent:
     """An approval request received via SSE."""
@@ -45,9 +44,30 @@ class ApprovalEvent:
     tool: str
     args: dict
 
+
+@dataclass
+class ApprovalResultEvent:
+    """An approval result received via SSE."""
+
+    approval_id: str
+    tool: str
+    status: str  # "approved", "denied", "error"
+    result: str | None
+
+
+@dataclass
+class SchedulerChangedEvent:
+    """A scheduler change event received via SSE."""
+
+    action: str  # "add", "remove"
+    job_id: str
+
+
 MessageHandler = Callable[[DiscordMessageEvent], Awaitable[None]]
 ReactionHandler = Callable[[DiscordReactionEvent], Awaitable[None]]
 ApprovalHandler = Callable[["ApprovalEvent"], Awaitable[None]]
+ApprovalResultHandler = Callable[["ApprovalResultEvent"], Awaitable[None]]
+SchedulerChangedHandler = Callable[["SchedulerChangedEvent"], Awaitable[None]]
 
 
 class SSEConsumer:
@@ -58,6 +78,8 @@ class SSEConsumer:
         self._message_handlers: list[MessageHandler] = []
         self._reaction_handlers: list[ReactionHandler] = []
         self._approval_handlers: list[ApprovalHandler] = []
+        self._approval_result_handlers: list[ApprovalResultHandler] = []
+        self._scheduler_changed_handlers: list[SchedulerChangedHandler] = []
         self._running = False
 
     def on_message(self, handler: MessageHandler) -> None:
@@ -68,6 +90,12 @@ class SSEConsumer:
 
     def on_approval(self, handler: ApprovalHandler) -> None:
         self._approval_handlers.append(handler)
+
+    def on_approval_result(self, handler: ApprovalResultHandler) -> None:
+        self._approval_result_handlers.append(handler)
+
+    def on_scheduler_changed(self, handler: SchedulerChangedHandler) -> None:
+        self._scheduler_changed_handlers.append(handler)
 
     async def _parse_sse_stream(self, response: aiohttp.ClientResponse) -> AsyncIterator[dict]:
         buffer = ""
@@ -94,14 +122,16 @@ class SSEConsumer:
         data = event.get("data", {})
 
         if event_type == "discord_message" and isinstance(data, dict):
+            raw_msg_id = data.get("message_id", 0)
             msg = DiscordMessageEvent(
-                message_id=int(data.get("message_id", 0)),
+                message_id=int(raw_msg_id),
                 channel_id=int(data.get("channel_id", 0)),
                 author_id=int(data.get("author_id", 0)),
                 author_name=data.get("author_name", ""),
                 content=data.get("content", ""),
                 timestamp=data.get("timestamp", ""),
             )
+            log.debug("discord_message_event", raw_id=raw_msg_id, parsed_id=msg.message_id)
             for handler in self._message_handlers:
                 try:
                     await handler(msg)
@@ -132,6 +162,30 @@ class SSEConsumer:
                     await handler(approval)
                 except Exception as e:
                     log.error("approval_handler_error", error=str(e))
+
+        elif event_type == "approval_result" and isinstance(data, dict):
+            result = ApprovalResultEvent(
+                approval_id=data.get("approval_id", ""),
+                tool=data.get("tool", ""),
+                status=data.get("status", ""),
+                result=data.get("result"),
+            )
+            for handler in self._approval_result_handlers:
+                try:
+                    await handler(result)
+                except Exception as e:
+                    log.error("approval_result_handler_error", error=str(e))
+
+        elif event_type == "scheduler_changed" and isinstance(data, dict):
+            event_obj = SchedulerChangedEvent(
+                action=data.get("action", ""),
+                job_id=data.get("job_id", ""),
+            )
+            for handler in self._scheduler_changed_handlers:
+                try:
+                    await handler(event_obj)
+                except Exception as e:
+                    log.error("scheduler_changed_handler_error", error=str(e))
 
     async def run(self, reconnect_delay: float = 5.0) -> None:
         self._running = True
@@ -188,12 +242,15 @@ class DiscordClient:
         if reply_to:
             payload["reply_to"] = str(reply_to)
 
-        async with aiohttp.ClientSession() as session:
-            async with session.post(url, json=payload) as response:
-                if response.status != 200:
-                    text = await response.text()
-                    return {"status": "error", "error": f"HTTP {response.status}: {text}"}
-                return await response.json()
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.post(url, json=payload) as response:
+                    if response.status != 200:
+                        text = await response.text()
+                        return {"status": "error", "error": f"HTTP {response.status}: {text}"}
+                    return await response.json()
+        except aiohttp.ClientError as e:
+            return {"status": "error", "error": f"Connection failed: {e}"}
 
     async def typing(self) -> dict:
         """Trigger typing indicator in Discord channel.
@@ -205,12 +262,15 @@ class DiscordClient:
         """
         url = f"{self.mcp_url}/discord/typing"
 
-        async with aiohttp.ClientSession() as session:
-            async with session.post(url) as response:
-                if response.status != 200:
-                    text = await response.text()
-                    return {"status": "error", "error": f"HTTP {response.status}: {text}"}
-                return await response.json()
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.post(url) as response:
+                    if response.status != 200:
+                        text = await response.text()
+                        return {"status": "error", "error": f"HTTP {response.status}: {text}"}
+                    return await response.json()
+        except aiohttp.ClientError as e:
+            return {"status": "error", "error": f"Connection failed: {e}"}
 
     async def react(self, message_id: int, emoji: str) -> dict:
         """Add a reaction to a Discord message.
@@ -225,9 +285,12 @@ class DiscordClient:
         url = f"{self.mcp_url}/discord/react"
         payload = {"message_id": str(message_id), "emoji": emoji}
 
-        async with aiohttp.ClientSession() as session:
-            async with session.post(url, json=payload) as response:
-                if response.status != 200:
-                    text = await response.text()
-                    return {"status": "error", "error": f"HTTP {response.status}: {text}"}
-                return await response.json()
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.post(url, json=payload) as response:
+                    if response.status != 200:
+                        text = await response.text()
+                        return {"status": "error", "error": f"HTTP {response.status}: {text}"}
+                    return await response.json()
+        except aiohttp.ClientError as e:
+            return {"status": "error", "error": f"Connection failed: {e}"}

@@ -48,9 +48,7 @@ class JobScheduler:
         self._job_callback: Callable[[str, str], Coroutine[Any, Any, None]] | None = None
         self._job_metadata: dict[str, dict[str, Any]] = {}
 
-    def set_callback(
-        self, callback: Callable[[str, str], Coroutine[Any, Any, None]]
-    ) -> None:
+    def set_callback(self, callback: Callable[[str, str], Coroutine[Any, Any, None]]) -> None:
         """
         Set the callback for when jobs fire.
 
@@ -64,14 +62,29 @@ class JobScheduler:
         if self._scheduler.running:
             log.debug("scheduler_already_running")
             return
-        self._load_jobs()
         self._scheduler.start()
+        self._load_jobs()
         log.info("scheduler_started", job_count=len(self._job_metadata))
 
     def shutdown(self) -> None:
         """Shut down the scheduler."""
         self._scheduler.shutdown(wait=False)
         log.info("scheduler_shutdown")
+
+    def reload_jobs(self) -> None:
+        """Reload jobs from the persistence file.
+
+        Clears all existing jobs and reloads from disk.
+        Used when jobs are modified by another process.
+        """
+        for job_id in list(self._job_metadata.keys()):
+            try:
+                self._scheduler.remove_job(job_id)
+            except Exception:
+                pass
+        self._job_metadata.clear()
+        self._load_jobs()
+        log.info("scheduler_reloaded", job_count=len(self._job_metadata))
 
     def _load_jobs(self) -> None:
         """Load jobs from the persistence file."""
@@ -283,6 +296,7 @@ class JobScheduler:
 
     def list_jobs(self) -> str:
         """List all scheduled jobs with their next run times."""
+        self._load_metadata_from_file()
         if not self._job_metadata:
             return "No scheduled jobs"
 
@@ -293,18 +307,31 @@ class JobScheduler:
             desc = meta.get("description") or meta.get("prompt", "")[:50]
             last_run = meta.get("last_run", "never")
 
-            # Get next run time from APScheduler
+            # Get next run time from APScheduler if running, otherwise show schedule
             job = self._scheduler.get_job(job_id)
             if job and getattr(job, "next_run_time", None):
                 next_run = getattr(job, "next_run_time").strftime("%Y-%m-%d %H:%M UTC")
             else:
-                next_run = "N/A"
+                next_run = f"(per {schedule})"
 
             lines.append(f"{status} **{job_id}** - `{schedule}`")
             lines.append(f"   {desc}")
             lines.append(f"   Next: {next_run} | Last: {last_run}")
 
         return "\n".join(lines)
+
+    def _load_metadata_from_file(self) -> None:
+        """Load just the metadata from file without adding to APScheduler.
+
+        Used by list_jobs when scheduler isn't running (e.g., in MCP process).
+        """
+        if not self._jobs_file.exists():
+            return
+        try:
+            data = json.loads(self._jobs_file.read_text())
+            self._job_metadata = {job["id"]: job for job in data if job.get("id")}
+        except Exception as e:
+            log.error("metadata_load_failed", error=str(e))
 
     def get_job(self, job_id: str) -> dict[str, Any] | None:
         """Get job metadata by ID."""
@@ -316,7 +343,13 @@ _scheduler: JobScheduler | None = None
 
 
 def get_scheduler() -> JobScheduler:
-    """Get or create the global scheduler instance."""
+    """Get or create the global scheduler instance.
+
+    Note: Caller must call start() if they want jobs to actually run.
+    The MCP server doesn't start the scheduler - it just reads/writes
+    the jobs file. The main_mcp process starts the scheduler with
+    the callback that handles job execution.
+    """
     global _scheduler
     if _scheduler is None:
         _scheduler = JobScheduler()

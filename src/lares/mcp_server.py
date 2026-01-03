@@ -37,6 +37,7 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse, StreamingResponse
 
 from lares.mcp_approval import get_queue
+from lares.scheduler import get_scheduler
 
 # Initialize MCP server
 mcp = FastMCP(
@@ -51,7 +52,19 @@ LARES_PROJECT = Path(os.getenv("LARES_PROJECT_PATH", "/home/daniele/workspace/la
 OBSIDIAN_VAULT = Path(
     os.getenv("OBSIDIAN_VAULT_PATH", "/home/daniele/workspace/gitlab/daniele/appunti")
 )
-ALLOWED_DIRECTORIES = [LARES_PROJECT, OBSIDIAN_VAULT]
+
+
+# Load allowed directories from environment
+def _load_allowed_directories() -> list[Path]:
+    """Load allowed directories from LARES_ALLOWED_PATHS env var, with fallback to defaults."""
+    allowed_paths = os.getenv("LARES_ALLOWED_PATHS", "")
+    if allowed_paths:
+        return [Path(p.strip()) for p in allowed_paths.split(":") if p.strip()]
+    else:
+        return [LARES_PROJECT, OBSIDIAN_VAULT]
+
+
+ALLOWED_DIRECTORIES = _load_allowed_directories()
 APPROVAL_DB = Path(
     os.getenv("LARES_APPROVAL_DB", "/home/daniele/workspace/lares/data/approvals.db")
 )
@@ -156,6 +169,7 @@ def setup_discord_bot() -> commands.Bot | None:
 
     return bot
 
+
 # Initialize Discord bot
 _discord_bot = setup_discord_bot()
 
@@ -241,9 +255,30 @@ def _get_bsky_auth_token() -> str | None:
 # === APPROVAL HTTP ENDPOINTS ===
 
 
+# Tools that never require approval - execute directly
+NO_APPROVAL_TOOLS = {
+    "memory_replace",
+    "memory_search",
+    "read_file",
+    "list_directory",
+    "read_rss_feed",
+    "read_bluesky_user",
+    "search_bluesky",
+    "search_obsidian_notes",
+    "read_obsidian_note",
+    "schedule_add_job",
+    "schedule_remove_job",
+    "schedule_list_jobs",
+}
+
+
 @mcp.custom_route("/approvals", methods=["POST"])
 async def create_approval(request: Request) -> JSONResponse:
-    """Create a new approval request (used by ToolExecutor for commands needing approval)."""
+    """Create a new approval request (used by ToolExecutor for commands needing approval).
+
+    For shell commands, checks allowlist and remembered patterns first.
+    If command is allowed, executes directly and returns result.
+    """
     try:
         data = await request.json()
         tool = data.get("tool")
@@ -256,10 +291,56 @@ async def create_approval(request: Request) -> JSONResponse:
         if isinstance(args, str):
             args = json.loads(args)
 
-        # Submit to approval queue
+        # Tools that never need approval - execute directly via MCP
+        if tool in NO_APPROVAL_TOOLS:
+            try:
+                result = await mcp.call_tool(tool, args)
+                return JSONResponse(
+                    {
+                        "status": "auto_approved",
+                        "result": str(result),
+                        "reason": "Tool does not require approval",
+                    }
+                )
+            except Exception as e:
+                return JSONResponse({"error": f"Tool execution failed: {e}"}, status_code=500)
+
+        # For shell commands, check if already allowed (allowlist or remembered)
+        if tool == "run_shell_command":
+            command = args.get("command", "")
+            working_dir = args.get("working_dir", str(LARES_PROJECT))
+
+            if is_shell_command_allowed(command):
+                # Execute directly - no approval needed
+                result = _execute_shell_command(command, working_dir)
+                return JSONResponse(
+                    {
+                        "status": "auto_approved",
+                        "result": result,
+                        "reason": "Command matches allowlist or remembered pattern",
+                    }
+                )
+
+        # For write_file, check if path is in allowed directories
+        if tool == "write_file":
+            file_path = args.get("path", "")
+            if is_path_allowed(file_path):
+                try:
+                    result = await mcp.call_tool(tool, args)
+                    return JSONResponse(
+                        {
+                            "status": "auto_approved",
+                            "result": str(result),
+                            "reason": "Path is in allowed directories",
+                        }
+                    )
+                except Exception as e:
+                    return JSONResponse({"error": f"Tool execution failed: {e}"}, status_code=500)
+
+        # Submit to approval queue for commands that need approval
         approval_id = approval_queue.submit(tool, args)
 
-        return JSONResponse({"id": approval_id, "status": "pending"})
+        return JSONResponse({"id": approval_id, "status": "pending"}, status_code=202)
     except Exception as e:
         return JSONResponse({"error": str(e)}, status_code=500)
 
@@ -316,7 +397,10 @@ async def approve_request(request: Request) -> JSONResponse:
     # Execute using internal functions (bypass approval check)
     try:
         if tool_name == "run_shell_command":
-            result_str = _execute_shell_command(args["command"], args.get("working_dir", str(LARES_PROJECT)))
+            working_dir = args.get("working_dir", str(LARES_PROJECT))
+            result_str = _execute_shell_command(args["command"], working_dir)
+        elif tool_name == "write_file":
+            result_str = _execute_write_file(args["path"], args["content"])
         elif tool_name == "post_to_bluesky":
             result_str = _execute_bluesky_post(args["text"])
         else:
@@ -325,11 +409,29 @@ async def approve_request(request: Request) -> JSONResponse:
             result_str = str(result)
 
         approval_queue.set_result(approval_id, result_str)
+
+        # Notify Lares via SSE that approval was resolved
+        await push_event(
+            "approval_result",
+            {
+                "approval_id": approval_id,
+                "tool": tool_name,
+                "status": "approved",
+                "result": result_str[:2000] if len(result_str) > 2000 else result_str,
+            },
+        )
+
         return JSONResponse({"status": "approved", "result": result_str})
     except Exception as e:
         error_msg = f"Execution error: {e}"
         approval_queue.set_result(approval_id, error_msg)
-        return JSONResponse({"status": "approved", "result": error_msg})
+
+        await push_event(
+            "approval_result",
+            {"approval_id": approval_id, "tool": tool_name, "status": "error", "result": error_msg},
+        )
+
+        return JSONResponse({"status": "error", "result": error_msg})
 
 
 @mcp.custom_route("/approvals/{approval_id}/deny", methods=["POST"])
@@ -344,6 +446,13 @@ async def deny_request(request: Request) -> JSONResponse:
         return JSONResponse({"error": f"Already {item['status']}"}, status_code=400)
 
     approval_queue.deny(approval_id)
+
+    # Notify Lares via SSE that approval was denied
+    await push_event(
+        "approval_result",
+        {"approval_id": approval_id, "tool": item["tool"], "status": "denied", "result": None},
+    )
+
     return JSONResponse({"status": "denied"})
 
 
@@ -401,6 +510,25 @@ async def health_check(request: Request) -> JSONResponse:
     )
 
 
+@mcp.custom_route("/tools", methods=["GET"])
+async def list_tools_endpoint(request: Request) -> JSONResponse:
+    """List all available tools with their schemas (Anthropic format)."""
+    mcp_tools = await mcp.list_tools()
+
+    # Convert MCP format to Anthropic format
+    anthropic_tools = []
+    for tool in mcp_tools:
+        anthropic_tools.append(
+            {
+                "name": tool.name,
+                "description": tool.description or "",
+                "input_schema": tool.inputSchema,
+            }
+        )
+
+    return JSONResponse({"tools": anthropic_tools})
+
+
 @mcp.custom_route("/events", methods=["GET"])
 async def events_endpoint(request: Request) -> StreamingResponse:
     """SSE endpoint for Lares Core to receive events (messages, reactions, etc.)."""
@@ -431,14 +559,13 @@ async def events_endpoint(request: Request) -> StreamingResponse:
     )
 
 
-
 # === DISCORD HTTP ENDPOINTS ===
 
 
 @mcp.custom_route("/discord/send", methods=["POST"])
 async def http_discord_send(request: Request) -> JSONResponse:
     """HTTP endpoint for Lares to send Discord messages.
-    
+
     Body: {"content": "message text", "reply_to": "optional_message_id"}
     """
     try:
@@ -458,10 +585,7 @@ async def http_discord_send(request: Request) -> JSONResponse:
         else:
             sent = await _discord_channel.send(content)
 
-        return JSONResponse({
-            "status": "ok",
-            "message_id": str(sent.id)
-        })
+        return JSONResponse({"status": "ok", "message_id": str(sent.id)})
     except Exception as e:
         return JSONResponse({"error": str(e)}, status_code=500)
 
@@ -469,7 +593,7 @@ async def http_discord_send(request: Request) -> JSONResponse:
 @mcp.custom_route("/discord/react", methods=["POST"])
 async def http_discord_react(request: Request) -> JSONResponse:
     """HTTP endpoint for Lares to add reactions to Discord messages.
-    
+
     Body: {"message_id": "12345", "emoji": "👀"}
     """
     try:
@@ -478,10 +602,7 @@ async def http_discord_react(request: Request) -> JSONResponse:
         emoji = body.get("emoji")
 
         if not message_id or not emoji:
-            return JSONResponse(
-                {"error": "message_id and emoji are required"},
-                status_code=400
-            )
+            return JSONResponse({"error": "message_id and emoji are required"}, status_code=400)
 
         if not _discord_channel:
             return JSONResponse({"error": "Discord not connected"}, status_code=503)
@@ -497,7 +618,7 @@ async def http_discord_react(request: Request) -> JSONResponse:
 @mcp.custom_route("/discord/typing", methods=["POST"])
 async def http_discord_typing(request: Request) -> JSONResponse:
     """HTTP endpoint to trigger Discord typing indicator.
-    
+
     Typing indicator lasts ~10 seconds or until a message is sent.
     """
     try:
@@ -536,15 +657,21 @@ async def discord_send_message(content: str, reply_to: str | None = None) -> str
 
 
 @mcp.tool()
-async def discord_react(message_id: str, emoji: str) -> str:
+async def discord_react(emoji: str, message_id: str | None = None) -> str:
     """React to a Discord message with an emoji.
 
     Args:
-        message_id: The ID of the message to react to
         emoji: The emoji to react with (e.g., "👀", "✅", "👍")
+        message_id: Optional ID of the message to react to.
+            If not provided, reacts to the current/last message.
     """
     if not _discord_channel:
         return "Error: Discord not connected"
+
+    # If no message_id provided, we can't do anything at this layer
+    # The tool executor should have provided one
+    if not message_id:
+        return "Error: No message_id provided and no default available"
 
     try:
         msg = await _discord_channel.fetch_message(int(message_id))
@@ -589,11 +716,8 @@ def list_directory(path: str) -> str:
         return f"Error listing directory: {e}"
 
 
-@mcp.tool()
-def write_file(path: str, content: str) -> str:
-    """Write content to a file. Requires approval in production mode."""
-    if not is_path_allowed(path):
-        return f"Error: Path not in allowed directories: {path}"
+def _execute_write_file(path: str, content: str) -> str:
+    """Internal: Execute file write without path check (for approved operations)."""
     try:
         Path(path).parent.mkdir(parents=True, exist_ok=True)
         with open(path, "w") as f:
@@ -601,6 +725,14 @@ def write_file(path: str, content: str) -> str:
         return f"Successfully wrote {len(content)} bytes to {path}"
     except Exception as e:
         return f"Error writing file: {e}"
+
+
+@mcp.tool()
+def write_file(path: str, content: str) -> str:
+    """Write content to a file. Requires approval in production mode."""
+    if not is_path_allowed(path):
+        return f"Error: Path not in allowed directories: {path}"
+    return _execute_write_file(path, content)
 
 
 def is_shell_command_allowed(command: str) -> bool:
@@ -621,7 +753,6 @@ def is_shell_command_allowed(command: str) -> bool:
 
 
 # === SHELL TOOL ===
-
 
 
 def _execute_shell_command(command: str, working_dir: str) -> str:
@@ -654,16 +785,16 @@ async def run_shell_command(command: str, working_dir: str | None = None) -> str
             "run_shell_command", {"command": command, "working_dir": cwd}
         )
         # Emit SSE event for approval notification
-        await push_event("approval_needed", {
-            "id": approval_id,
-            "tool": "run_shell_command",
-            "command": command,
-            "working_dir": cwd,
-        })
-        return (
-            f"⏳ Command requires approval. ID: {approval_id}\n"
-            f"Approval request sent via SSE."
+        await push_event(
+            "approval_needed",
+            {
+                "id": approval_id,
+                "tool": "run_shell_command",
+                "command": command,
+                "working_dir": cwd,
+            },
         )
+        return f"⏳ Command requires approval. ID: {approval_id}\nApproval request sent via SSE."
 
     # Allowed command - run directly
     return _execute_shell_command(command, cwd)
@@ -829,15 +960,15 @@ async def post_to_bluesky(text: str) -> str:
     # BlueSky posts always require approval
     approval_id = approval_queue.submit("post_to_bluesky", {"text": text})
     # Emit SSE event for approval notification
-    await push_event("approval_needed", {
-        "id": approval_id,
-        "tool": "post_to_bluesky",
-        "text": text,
-    })
-    return (
-        f"🦋 BlueSky post queued for approval. ID: {approval_id}\n"
-        f"Approval request sent via SSE."
+    await push_event(
+        "approval_needed",
+        {
+            "id": approval_id,
+            "tool": "post_to_bluesky",
+            "text": text,
+        },
     )
+    return f"🦋 BlueSky post queued for approval. ID: {approval_id}\nApproval request sent via SSE."
 
 
 # === OBSIDIAN TOOLS ===
@@ -901,6 +1032,143 @@ def read_obsidian_note(path: str) -> str:
         return f"📄 {path}\n{'=' * 40}\n\n{content}"
     except Exception as e:
         return f"Error reading note: {e}"
+
+
+# === MEMORY TOOLS ===
+
+
+@mcp.tool()
+async def memory_replace(label: str, old_str: str, new_str: str) -> str:
+    """Replace part of a memory block's content.
+
+    Args:
+        label: The memory block label (persona, human, state, ideas)
+        old_str: The exact text to replace
+        new_str: The replacement text
+
+    Returns:
+        Success or error message
+    """
+    try:
+        # Import here to avoid circular dependencies
+        from lares.config import load_memory_config
+        from lares.orchestrator_factory import create_memory_provider
+
+        # Get memory provider
+        memory_config = load_memory_config()
+        memory = await create_memory_provider(
+            sqlite_path=memory_config.sqlite_path,
+        )
+
+        # Get current context to find the block
+        context = await memory.get_context()
+        current_block = None
+        for block in context.blocks:
+            if block.label == label:
+                current_block = block
+                break
+
+        if not current_block:
+            await memory.shutdown()
+            return f"Error: Memory block '{label}' not found"
+
+        # Perform replacement
+        if old_str not in current_block.value:
+            await memory.shutdown()
+            return f"Error: String '{old_str}' not found in memory block '{label}'"
+
+        new_value = current_block.value.replace(old_str, new_str)
+        await memory.update_block(label, new_value)
+        await memory.shutdown()
+
+        return f"Successfully updated memory block '{label}'"
+
+    except Exception as e:
+        return f"Error updating memory: {e}"
+
+
+@mcp.tool()
+async def memory_search(query: str, limit: int = 5) -> str:
+    """Search through memory blocks and recent messages.
+
+    Args:
+        query: Text to search for
+        limit: Maximum number of results to return
+
+    Returns:
+        Search results from memory
+    """
+    try:
+        # Import here to avoid circular dependencies
+        from lares.config import load_memory_config
+        from lares.orchestrator_factory import create_memory_provider
+
+        # Get memory provider
+        memory_config = load_memory_config()
+        memory = await create_memory_provider(
+            sqlite_path=memory_config.sqlite_path,
+        )
+
+        results = await memory.search(query, limit)
+        await memory.shutdown()
+
+        if not results:
+            return f"No matches found for '{query}'"
+
+        formatted_results = []
+        for result in results:
+            formatted_results.append(
+                f"ID: {result['id']}\n"
+                f"Role: {result['role']}\n"
+                f"Date: {result['created_at']}\n"
+                f"Content: {result['content'][:200]}...\n"
+            )
+
+        return f"Search results for '{query}':\n\n" + "\n---\n".join(formatted_results)
+
+    except Exception as e:
+        return f"Error searching memory: {e}"
+
+
+# === SCHEDULER TOOLS ===
+
+
+@mcp.tool()
+async def schedule_add_job(job_id: str, prompt: str, schedule: str, description: str = "") -> str:
+    """Add a scheduled job.
+
+    Args:
+        job_id: Unique identifier for the job
+        prompt: Message to send to agent when job fires
+        schedule: Cron ("0 9 * * *"), ISO datetime, or interval ("every 2 hours")
+        description: Human-readable description
+    """
+    scheduler = get_scheduler()
+    result = scheduler.add_job(job_id, prompt, schedule, description)
+    if not result.startswith("Error"):
+        await push_event("scheduler_changed", {"action": "add", "job_id": job_id})
+    return result
+
+
+@mcp.tool()
+async def schedule_remove_job(job_id: str) -> str:
+    """Remove a scheduled job.
+
+    Args:
+        job_id: The job identifier to remove
+    """
+    scheduler = get_scheduler()
+    result = scheduler.remove_job(job_id)
+    if not result.startswith("Error"):
+        await push_event("scheduler_changed", {"action": "remove", "job_id": job_id})
+    return result
+
+
+@mcp.tool()
+def schedule_list_jobs() -> str:
+    """List all scheduled jobs with schedules and next run times."""
+    scheduler = get_scheduler()
+    return scheduler.list_jobs()
 
 
 # === ENTRY POINT ===

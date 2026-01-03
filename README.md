@@ -13,7 +13,10 @@ Inspired by [Strix](https://timkellogg.me/blog/2025/12/15/strix), Lares is an am
 
 ## Features
 
-- **Persistent Memory**: Uses [Letta](https://letta.com) for long-term memory that survives restarts
+- **Dual Memory Modes**:
+  - **Letta Mode**: Uses [Letta](https://letta.com) for managed memory and conversation
+  - **Direct LLM Mode**: SQLite-based memory with direct Claude API integration
+- **Persistent Memory**: Long-term memory that survives restarts with automatic compaction
 - **Discord Interface**: Chat with Lares through Discord
 - **Memory Blocks**: Organized memory for identity, human preferences, state, and ideas
 - **Autonomous Operation**: "Perch time" ticks every hour for self-reflection and proactive actions
@@ -29,8 +32,9 @@ Inspired by [Strix](https://timkellogg.me/blog/2025/12/15/strix), Lares is an am
 ### Prerequisites
 
 - Python 3.11+
-- A [Letta Cloud](https://app.letta.com) account (or self-hosted Letta)
+- An LLM provider API key (Anthropic, OpenAI) or local Ollama installation
 - A Discord bot token
+- (Optional) A [Letta Cloud](https://app.letta.com) account for Letta mode
 
 ### Installation
 
@@ -58,16 +62,32 @@ sudo bash scripts/setup-sudoers.sh
 cp .env.example .env
 
 # Edit .env with your credentials:
-# - LETTA_API_KEY: From app.letta.com (or use LETTA_BASE_URL for self-hosted)
 # - DISCORD_BOT_TOKEN: From Discord Developer Portal
 # - DISCORD_CHANNEL_ID: The channel where Lares will listen
-# - ANTHROPIC_API_KEY: For the LLM (required for self-hosted Letta)
+
+# Choose LLM provider (pick one):
+# - LLM_PROVIDER=anthropic (default): Requires ANTHROPIC_API_KEY
+# - LLM_PROVIDER=openai: Requires OPENAI_API_KEY
+# - LLM_PROVIDER=ollama: Local models, no API key needed
+#   Set OLLAMA_BASE_URL if not localhost:11434
+#   Set OLLAMA_MODEL for model choice (default: llama3.2)
+
+# Choose memory mode:
+# - USE_DIRECT_LLM=true: Use SQLite + Claude directly (recommended)
+# - USE_DIRECT_LLM=false: Use Letta for memory management
+# - MEMORY_PROVIDER=sqlite: SQLite memory (for direct mode)
+# - MEMORY_PROVIDER=letta: Letta memory (for Letta mode)
+
+# For Letta mode only:
+# - LETTA_API_KEY: From app.letta.com (or use LETTA_BASE_URL for self-hosted)
 
 # Optional integrations:
 # - BLUESKY_HANDLE: Your BlueSky handle (e.g., user.bsky.social)
 # - BLUESKY_APP_PASSWORD: App password from BlueSky settings
 # - OBSIDIAN_VAULT_PATH: Path to your Obsidian vault folder
 # - LARES_MAX_TOOL_ITERATIONS: Max tool iterations per message (default: 10)
+# - CONTEXT_LIMIT: Token limit for context (default: 50000)
+# - COMPACT_THRESHOLD: Trigger compaction at % of limit (default: 0.70)
 ```
 
 ### Running
@@ -209,32 +229,99 @@ mypy src/
 
 ## Architecture
 
+### Core Components
+
 ```
 src/lares/
-├── config.py          # Configuration management
-├── memory.py          # Letta integration and memory blocks
-├── discord_bot.py     # Discord interface and perch time
-├── scheduler.py       # Job scheduling with APScheduler
-├── tool_registry.py   # Tool execution and approval workflow
-├── response_parser.py # Discord response parsing (reactions, messages)
-├── time_utils.py      # Time context and timezone handling
-├── bluesky_reader.py  # BlueSky API client
-├── rss_reader.py      # RSS/Atom feed parser
-├── obsidian.py        # Obsidian vault integration (optional)
-├── mcp_server.py     # MCP server exposing tools via SSE
-├── mcp_approval.py   # SQLite-based approval queue for MCP
-├── mcp_bridge.py     # Bridges MCP approvals to Discord
-├── tools/             # Tool implementations
-│   ├── filesystem.py      # read_file, write_file
-│   ├── shell.py           # run_command
-│   ├── discord.py         # send_message, react
-│   ├── scheduler.py       # schedule_job, remove_job, list_jobs
-│   ├── rss.py             # read_rss_feed
-│   ├── bluesky.py         # read_bluesky_user, search_bluesky, post_to_bluesky
-│   ├── system_management.py  # restart_lares
-│   └── tool_creation.py   # create_tool (dynamic tool creation)
-└── main.py            # Entry point
+├── config.py              # Configuration management
+├── main_mcp.py           # Main entry point for MCP/SSE mode
+├── orchestrator.py       # Central coordinator for tool loop
+├── orchestrator_factory.py # Factory for creating orchestrators
+├── providers/            # Abstraction layer for swappable components
+│   ├── llm.py               # LLM provider interface
+│   ├── anthropic.py         # Claude/Anthropic implementation
+│   ├── memory.py            # Memory provider interface
+│   ├── sqlite.py            # SQLite memory implementation
+│   ├── letta.py             # Letta memory implementation
+│   ├── tool_executor.py     # Async tool executor
+│   └── tool_registry.py     # Tool schema management
+├── memory.py             # Letta integration and memory blocks
+├── discord_bot.py        # Discord interface and perch time
+├── scheduler.py          # Job scheduling with APScheduler
+├── tool_registry.py      # Tool execution and approval workflow
+├── response_parser.py    # Discord response parsing (reactions, messages)
+├── time_utils.py         # Time context and timezone handling
+├── bluesky_reader.py     # BlueSky API client
+├── rss_reader.py         # RSS/Atom feed parser
+├── obsidian.py           # Obsidian vault integration (optional)
+├── compaction.py         # Memory compaction service
+├── sse_consumer.py       # SSE event consumer for Discord events
+├── mcp_server.py         # MCP server exposing tools via SSE
+├── mcp_approval.py       # SQLite-based approval queue for MCP
+├── mcp_bridge.py         # Bridges MCP approvals to Discord
+├── tools/                # Tool implementations
+│   ├── filesystem.py        # read_file, write_file
+│   ├── shell.py             # run_command
+│   ├── discord.py           # send_message, react
+│   ├── scheduler.py         # schedule_job, remove_job, list_jobs
+│   ├── rss.py               # read_rss_feed
+│   ├── bluesky.py           # read_bluesky_user, search_bluesky, post_to_bluesky
+│   ├── system_management.py # restart_lares
+│   └── tool_creation.py     # create_tool (dynamic tool creation)
+└── main.py               # Entry point (legacy Letta mode)
 ```
+
+### Dual Architecture: Letta vs Direct Mode
+
+Lares supports two operational modes:
+
+#### 1. Letta Mode (Legacy)
+- Uses Letta for both LLM orchestration and memory management
+- All conversation and tool execution handled by Letta
+- Memory compaction managed by Letta automatically
+- Configuration: `USE_DIRECT_LLM=false`, `MEMORY_PROVIDER=letta`
+
+#### 2. Direct LLM Mode (Recommended)
+- Direct integration with Claude API via Anthropic SDK
+- SQLite database for memory persistence
+- Custom orchestrator handles tool loop
+- Automatic memory compaction when approaching token limits
+- Configuration: `USE_DIRECT_LLM=true`, `MEMORY_PROVIDER=sqlite`
+
+### Data Flow in Direct Mode
+
+```
+Discord Message → MCP Server (SSE) → LaresCore → Orchestrator
+                                                      ↓
+                                            [Tool Loop]
+                                            1. Get context from SQLite
+                                            2. Call Claude API
+                                            3. Execute tools if needed
+                                            4. Loop until done
+                                                      ↓
+                                            Discord Response
+```
+
+### Key Abstractions
+
+#### Orchestrator
+Central coordinator that manages the tool execution loop:
+- Coordinates between LLM, Memory, and Tool providers
+- Handles iterative tool calling (max 10 iterations by default)
+- Manages context and token usage
+- Triggers memory compaction when needed
+
+#### Provider Interfaces
+Swappable implementations for core functionality:
+- **LLMProvider**: Interface for language models (Anthropic/Claude implemented)
+- **MemoryProvider**: Interface for memory storage (SQLite, Letta)
+- **ToolExecutor**: Async tool execution with Discord integration
+
+#### Memory Management
+- **SQLite Schema**: `messages`, `memory_blocks`, `summaries` tables
+- **Automatic Compaction**: Triggers at 70% of context limit (default 35k/50k tokens)
+- **Session Buffer**: Short-term memory within a conversation
+- **Migration Tool**: `scripts/migrate_letta_to_sqlite.py` for transitioning from Letta
 
 ### Memory Compaction Recovery
 
@@ -272,6 +359,27 @@ Example skills in `examples/skills/`:
 - `discord-interaction.md` - Communication patterns
 
 Skills are indexed in Lares's persona (lightweight pointers) and loaded via `read_file` when performing related tasks.
+
+### Troubleshooting
+
+#### Discord Reactions Not Working
+If Discord reactions fail with "Unknown Message" errors:
+1. Ensure the MCP server has been restarted after updates
+2. Check that the bot has proper permissions in the Discord channel
+3. Verify `DISCORD_CHANNEL_ID` matches where messages are being sent
+4. The system now intelligently tracks message IDs and ignores any fake IDs that the LLM might generate
+
+#### Memory Compaction Issues
+If you see frequent memory compaction:
+1. Adjust `CONTEXT_LIMIT` (default 50000 tokens)
+2. Adjust `COMPACT_THRESHOLD` (default 0.70 = compact at 70% full)
+3. Consider clearing old conversations with migration tool
+
+#### Tool Execution Not Working
+If tools appear as text like "[Tool-only response: ...]":
+1. Ensure `USE_DIRECT_LLM=true` for direct mode
+2. Restart the MCP server after configuration changes
+3. Check that `ANTHROPIC_API_KEY` is valid
 
 ### Available Tools
 

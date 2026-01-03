@@ -1,55 +1,73 @@
 """Tests for MCP-based entry point."""
 
 from unittest.mock import AsyncMock, MagicMock
+
 import pytest
+
 from lares.main_mcp import LaresCore
 
 
 class TestLaresCoreInit:
     def test_initialization(self):
         config = MagicMock()
-        config.tools = MagicMock()
         config.user.timezone = "America/Los_Angeles"
-        letta_client = MagicMock()
         discord = MagicMock()
-        core = LaresCore(config, letta_client, "agent-123", discord, "http://localhost:8765")
+        orchestrator = MagicMock()
+        core = LaresCore(config, discord, "http://localhost:8765", orchestrator)
         assert core.config == config
-        assert core.agent_id == "agent-123"
-        assert core.max_tool_iterations == 100  # From LARES_MAX_TOOL_ITERATIONS env
+        assert core.mcp_url == "http://localhost:8765"
 
 
-class TestExecuteTool:
+class TestApprovalManager:
+    def test_initialization(self):
+        from lares.main_mcp import ApprovalManager
+        discord = MagicMock()
+        manager = ApprovalManager("http://localhost:8765", discord)
+        assert manager.mcp_url == "http://localhost:8765"
+        assert manager._pending == {}
+        assert manager._posted == set()
+
+    @pytest.mark.asyncio
+    async def test_handle_reaction_not_pending(self):
+        from lares.main_mcp import ApprovalManager
+        discord = MagicMock()
+        manager = ApprovalManager("http://localhost:8765", discord)
+        result = await manager.handle_reaction(12345, "✅", 1)
+        assert result is False
+
+    @pytest.mark.asyncio
+    async def test_handle_reaction_unknown_emoji(self):
+        from lares.main_mcp import ApprovalManager
+        discord = MagicMock()
+        manager = ApprovalManager("http://localhost:8765", discord)
+        manager._pending[12345] = "approval-123"
+        result = await manager.handle_reaction(12345, "🤔", 1)
+        assert result is False
+
+
+class TestLaresCoreMessage:
     @pytest.fixture
     def core(self):
         config = MagicMock()
-        config.tools = MagicMock()
-        letta_client = MagicMock()
+        config.user.timezone = "America/Los_Angeles"
         discord = AsyncMock()
-        return LaresCore(config, letta_client, "agent-123", discord, "http://localhost:8765")
+        orchestrator = AsyncMock()
+        return LaresCore(config, discord, "http://localhost:8765", orchestrator)
 
     @pytest.mark.asyncio
-    async def test_routes_discord_send_message(self, core):
-        core.discord.send_message.return_value = {"status": "OK"}
-        await core._execute_tool("discord_send_message", {"content": "Hello!"})
-        core.discord.send_message.assert_called_once_with("Hello!", None)
+    async def test_dedupes_messages(self, core):
+        from lares.sse_consumer import DiscordMessageEvent
+        event = DiscordMessageEvent(
+            message_id=123,
+            channel_id=456,
+            author_id=789,
+            author_name="test",
+            content="Hello",
+            timestamp="2026-01-01T00:00:00Z"
+        )
+        await core.handle_message(event)
+        core.orchestrator.process_message.assert_called_once()
 
-    @pytest.mark.asyncio
-    async def test_discord_react_uses_current_message(self, core):
-        core._current_message_id = 67890
-        core.discord.react.return_value = {"status": "OK"}
-        await core._execute_tool("discord_react", {"emoji": "✅"})
-        core.discord.react.assert_called_once_with(67890, "✅")
-
-    @pytest.mark.asyncio
-    async def test_discord_react_no_message_returns_error(self, core):
-        core._current_message_id = None
-        result = await core._execute_tool("discord_react", {"emoji": "👀"})
-        assert "Error" in result
-        core.discord.react.assert_not_called()
-
-    @pytest.mark.asyncio
-    async def test_other_tools_use_executor(self, core):
-        core.tool_executor.execute = AsyncMock(return_value="file contents")
-        result = await core._execute_tool("read_file", {"path": "/some/file"})
-        core.tool_executor.execute.assert_called_once()
-        assert result == "file contents"
+        core.orchestrator.reset_mock()
+        await core.handle_message(event)
+        core.orchestrator.process_message.assert_not_called()

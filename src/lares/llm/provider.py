@@ -2,62 +2,43 @@
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
+from typing import Any
+
+
+@dataclass
+class ToolCall:
+    """A tool call requested by the LLM."""
+    id: str
+    name: str
+    arguments: dict[str, Any]
 
 
 @dataclass
 class LLMResponse:
     """Response from an LLM call."""
-
     content: str
-    # Tool calls the LLM wants to make
-    tool_calls: list[dict] = field(default_factory=list)
-    # Usage stats (optional)
+    tool_calls: list[ToolCall] = field(default_factory=list)
+    usage: dict[str, int] | None = None
     input_tokens: int | None = None
     output_tokens: int | None = None
-    # Model used
     model: str | None = None
-    # Stop reason
     stop_reason: str | None = None
 
 
 class LLMProvider(ABC):
-    """Abstract base class for LLM providers.
-
-    Implementations must provide a way to send messages
-    and receive responses from an LLM.
-    """
+    """Abstract base class for LLM providers."""
 
     @abstractmethod
-    def send(
-        self,
-        messages: list[dict],
-        system_prompt: str | None = None,
-        tools: list[dict] | None = None,
-    ) -> LLMResponse:
-        """Send messages to the LLM and get a response.
-
-        Args:
-            messages: List of message dicts with 'role' and 'content'
-            system_prompt: Optional system prompt to prepend
-            tools: Optional list of tool definitions for function calling
-
-        Returns:
-            LLMResponse with content and optional tool calls
-        """
+    def send(self, messages: list[dict], system_prompt: str | None = None,
+             tools: list[dict] | None = None, max_tokens: int = 4096) -> LLMResponse:
         ...
 
     @abstractmethod
-    async def send_async(
-        self,
-        messages: list[dict],
-        system_prompt: str | None = None,
-        tools: list[dict] | None = None,
-    ) -> LLMResponse:
-        """Async version of send."""
+    async def send_async(self, messages: list[dict], system_prompt: str | None = None,
+                         tools: list[dict] | None = None, max_tokens: int = 4096) -> LLMResponse:
         ...
 
     @property
     @abstractmethod
     def model_name(self) -> str:
-        """Return the model name/identifier."""
         ...

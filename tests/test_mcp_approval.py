@@ -134,7 +134,7 @@ class TestRememberedCommands:
         """Test listing remembered commands."""
         queue.add_remembered_command("pip install something", approved_by="daniele")
         queue.add_remembered_command("npm run build", approved_by="daniele")
-        
+
         patterns = queue.get_remembered_commands()
         assert len(patterns) == 2
         pattern_names = [p["pattern"] for p in patterns]
@@ -145,7 +145,7 @@ class TestRememberedCommands:
         """Test removing a remembered pattern."""
         queue.add_remembered_command("docker compose up")
         assert queue.is_command_remembered("docker ps")
-        
+
         removed = queue.remove_remembered_command("docker")
         assert removed
         assert not queue.is_command_remembered("docker ps")
