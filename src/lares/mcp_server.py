@@ -30,6 +30,9 @@ import urllib.request
 from datetime import UTC, datetime
 from pathlib import Path
 
+from dotenv import load_dotenv
+load_dotenv()
+
 import discord
 from discord.ext import commands
 from mcp.server import FastMCP

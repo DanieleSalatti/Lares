@@ -96,6 +96,15 @@ cp .env.example .env
 
 For testing and development:
 
+##### MCP Server
+
+```bash
+source .venv/bin/activate
+python -m lares.mcp_server
+```
+
+##### Lares itself
+
 ```bash
 # Activate virtual environment
 source .venv/bin/activate
