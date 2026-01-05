@@ -146,8 +146,16 @@ class GraphMemoryMixin:
         query: str,
         limit: int = 10,
         source_filter: str | None = None,
+        strengthen_connections: bool = True,
     ) -> list[dict]:
-        """Search nodes by content (text search for Phase 1)."""
+        """Search nodes by content (text search for Phase 1).
+
+        Args:
+            query: Text to search for
+            limit: Max results to return
+            source_filter: Optional filter by source type
+            strengthen_connections: If True, strengthen edges between co-accessed nodes
+        """
         if not self._db:
             return []
 
@@ -179,7 +187,7 @@ class GraphMemoryMixin:
             )
 
         rows = await cursor.fetchall()
-        return [
+        results = [
             {
                 "id": row["id"],
                 "content": row["content"],
@@ -192,6 +200,14 @@ class GraphMemoryMixin:
             }
             for row in rows
         ]
+
+        # Hebbian co-activation: strengthen edges between nodes found together
+        if strengthen_connections and len(results) >= 2:
+            node_ids = [r["id"] for r in results]
+            await self.strengthen_co_accessed_edges(node_ids)
+
+        return results
+
 
     async def list_recent_nodes(
         self,
@@ -331,6 +347,58 @@ class GraphMemoryMixin:
         )
         row = await cursor.fetchone()
         return row["weight"] if row else 0.0
+
+    async def strengthen_co_accessed_edges(
+        self,
+        node_ids: list[str],
+        amount: float = 0.02,
+    ) -> int:
+        """Strengthen edges between nodes accessed together (Hebbian co-activation).
+
+        "Neurons that fire together wire together" - when nodes appear in
+        the same search result, their connections should strengthen.
+
+        Args:
+            node_ids: List of node IDs that were accessed together
+            amount: Small bump per co-access (default 0.02, subtle effect)
+
+        Returns:
+            Number of edges strengthened
+        """
+        if not self._db or len(node_ids) < 2:
+            return 0
+
+        now = datetime.now(tz=UTC).isoformat()
+        strengthened = 0
+
+        # Strengthen edges between all pairs of co-accessed nodes
+        for i, source_id in enumerate(node_ids):
+            for target_id in node_ids[i + 1:]:
+                # Try both directions since edges are directional
+                for src, tgt in [(source_id, target_id), (target_id, source_id)]:
+                    cursor = await self._db.execute(
+                        """
+                        UPDATE memory_edges
+                        SET weight = MIN(1.0, weight + ?),
+                            last_strengthened = ?
+                        WHERE source_node_id = ? AND target_node_id = ?
+                        """,
+                        (amount, now, src, tgt),
+                    )
+                    if cursor.rowcount > 0:
+                        strengthened += 1
+
+        await self._db.commit()
+
+        if strengthened > 0:
+            log.info(
+                "edges_co_strengthened",
+                node_count=len(node_ids),
+                edges_strengthened=strengthened,
+                amount=amount,
+            )
+
+        return strengthened
 
     async def get_connected_nodes(
         self,
@@ -476,4 +544,240 @@ class GraphMemoryMixin:
             "edge_count": edge_count,
             "avg_connections": round(avg_connections, 2),
             "nodes_by_source": by_source,
+        }
+
+    # === Hebbian Dynamics ===
+
+    async def decay_edges(
+        self,
+        decay_rate: float = 0.05,
+        floor: float = 0.1,
+    ) -> dict:
+        """Apply exponential decay to all edge weights (Hebbian forgetting).
+
+        Edges that haven't been strengthened recently will weaken.
+        Formula: new_weight = max(floor, weight * (1 - decay_rate))
+
+        Args:
+            decay_rate: Fraction to decay per call (0.05 = 5% decay)
+            floor: Minimum weight (edges never fully disappear)
+
+        Returns:
+            Stats about the decay operation
+        """
+        if not self._db:
+            raise RuntimeError("Provider not initialized")
+
+        # Get current stats before decay
+        cursor = await self._db.execute(
+            "SELECT COUNT(*) as count, AVG(weight) as avg_weight FROM memory_edges"
+        )
+        before = await cursor.fetchone()
+        before_avg = before["avg_weight"] if before["avg_weight"] else 0
+
+        # Apply decay: weight = MAX(floor, weight * (1 - decay_rate))
+        await self._db.execute(
+            """
+            UPDATE memory_edges
+            SET weight = MAX(?, weight * ?)
+            """,
+            (floor, 1 - decay_rate),
+        )
+        await self._db.commit()
+
+        # Get stats after decay
+        cursor = await self._db.execute(
+            "SELECT COUNT(*) as count, AVG(weight) as avg_weight FROM memory_edges"
+        )
+        after = await cursor.fetchone()
+        after_avg = after["avg_weight"] if after["avg_weight"] else 0
+
+        log.info(
+            "edges_decayed",
+            decay_rate=decay_rate,
+            floor=floor,
+            before_avg=round(before_avg, 3),
+            after_avg=round(after_avg, 3),
+            edge_count=after["count"] if after else 0,
+        )
+
+        return {
+            "edge_count": after["count"] if after else 0,
+            "decay_rate": decay_rate,
+            "floor": floor,
+            "before_avg_weight": round(before_avg, 3),
+            "after_avg_weight": round(after_avg, 3),
+        }
+
+    # === Weight-Aware Retrieval ===
+
+    async def search_memory_nodes_weighted(
+        self,
+        query: str,
+        limit: int = 10,
+        source_filter: str | None = None,
+        weight_boost: float = 0.3,
+        strengthen_connections: bool = True,
+    ) -> list[dict]:
+        """Search nodes with weight-aware ranking.
+
+        Unlike basic search (ordered by recency), this method boosts nodes
+        that have stronger connections in the graph. Well-connected nodes
+        are likely to be more important.
+
+        Args:
+            query: Text to search for
+            limit: Max results to return
+            source_filter: Optional filter by source type
+            weight_boost: How much to weight graph connectivity (0.0-1.0)
+                         0.0 = pure text search, 1.0 = heavily favor connected nodes
+            strengthen_connections: If True, strengthen edges between co-accessed nodes
+
+        Returns:
+            List of nodes with added 'graph_score' and 'final_score' fields
+
+        Scoring formula:
+            graph_score = (sum of incoming weights + sum of outgoing weights) / 2
+            final_score = (1 - weight_boost) * recency_rank + weight_boost * graph_score
+        """
+        if not self._db:
+            return []
+
+        pattern = f"%{query}%"
+
+        # First, get text-matching candidates (more than we need for re-ranking)
+        fetch_limit = limit * 3  # Fetch more to have candidates for re-ranking
+
+        if source_filter:
+            cursor = await self._db.execute(
+                """
+                SELECT id, content, summary, source, tags, access_count,
+                       created_at, last_accessed
+                FROM memory_nodes
+                WHERE (content LIKE ? OR summary LIKE ?) AND source = ?
+                ORDER BY last_accessed DESC
+                LIMIT ?
+                """,
+                (pattern, pattern, source_filter, fetch_limit),
+            )
+        else:
+            cursor = await self._db.execute(
+                """
+                SELECT id, content, summary, source, tags, access_count,
+                       created_at, last_accessed
+                FROM memory_nodes
+                WHERE content LIKE ? OR summary LIKE ?
+                ORDER BY last_accessed DESC
+                LIMIT ?
+                """,
+                (pattern, pattern, fetch_limit),
+            )
+
+        rows = await cursor.fetchall()
+
+        if not rows:
+            return []
+
+        # Build candidate list with graph scores
+        candidates = []
+        for i, row in enumerate(rows):
+            node_id = row["id"]
+
+            # Calculate graph score: sum of edge weights touching this node
+            incoming_cursor = await self._db.execute(
+                "SELECT COALESCE(SUM(weight), 0) as total "
+                "FROM memory_edges WHERE target_node_id = ?",
+                (node_id,),
+            )
+            incoming = await incoming_cursor.fetchone()
+            incoming_weight = incoming["total"] if incoming else 0
+
+            outgoing_cursor = await self._db.execute(
+                "SELECT COALESCE(SUM(weight), 0) as total "
+                "FROM memory_edges WHERE source_node_id = ?",
+                (node_id,),
+            )
+            outgoing = await outgoing_cursor.fetchone()
+            outgoing_weight = outgoing["total"] if outgoing else 0
+
+            graph_score = (incoming_weight + outgoing_weight) / 2
+
+            # Recency rank: 1.0 for most recent, decays for older
+            recency_rank = 1.0 - (i / fetch_limit)
+
+            # Final score combines recency and graph connectivity
+            final_score = (
+                (1 - weight_boost) * recency_rank + weight_boost * graph_score
+            )
+
+            candidates.append({
+                "id": row["id"],
+                "content": row["content"],
+                "summary": row["summary"],
+                "source": row["source"],
+                "tags": json.loads(row["tags"]) if row["tags"] else [],
+                "access_count": row["access_count"],
+                "created_at": row["created_at"],
+                "last_accessed": row["last_accessed"],
+                "graph_score": round(graph_score, 3),
+                "recency_rank": round(recency_rank, 3),
+                "final_score": round(final_score, 3),
+            })
+
+        # Sort by final score (descending) and take top 'limit'
+        candidates.sort(key=lambda x: x["final_score"], reverse=True)
+        results = candidates[:limit]
+
+        # Hebbian co-activation: strengthen edges between nodes found together
+        if strengthen_connections and len(results) >= 2:
+            node_ids = [r["id"] for r in results]
+            await self.strengthen_co_accessed_edges(node_ids)
+
+        return results
+
+    async def get_node_connectivity(self, node_id: str) -> dict:
+        """Get connectivity stats for a specific node.
+
+        Returns incoming/outgoing weights and counts.
+        """
+        if not self._db:
+            return {}
+
+        # Incoming edges
+        cursor = await self._db.execute(
+            """
+            SELECT COUNT(*) as count, COALESCE(SUM(weight), 0) as total,
+                   COALESCE(AVG(weight), 0) as avg
+            FROM memory_edges WHERE target_node_id = ?
+            """,
+            (node_id,),
+        )
+        incoming = await cursor.fetchone()
+
+        # Outgoing edges
+        cursor = await self._db.execute(
+            """
+            SELECT COUNT(*) as count, COALESCE(SUM(weight), 0) as total,
+                   COALESCE(AVG(weight), 0) as avg
+            FROM memory_edges WHERE source_node_id = ?
+            """,
+            (node_id,),
+        )
+        outgoing = await cursor.fetchone()
+
+        inc_total = incoming["total"] if incoming else 0
+        out_total = outgoing["total"] if outgoing else 0
+
+        return {
+            "incoming": {
+                "count": incoming["count"] if incoming else 0,
+                "total_weight": round(inc_total, 3),
+                "avg_weight": round(incoming["avg"], 3) if incoming else 0,
+            },
+            "outgoing": {
+                "count": outgoing["count"] if outgoing else 0,
+                "total_weight": round(out_total, 3),
+                "avg_weight": round(outgoing["avg"], 3) if outgoing else 0,
+            },
+            "graph_score": round((inc_total + out_total) / 2, 3),
         }

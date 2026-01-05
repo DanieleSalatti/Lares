@@ -21,8 +21,8 @@ async def restart_lares() -> str:
     - Periodic fresh starts during autonomous operation
 
     Requires passwordless sudo access for:
-    - 'systemctl restart lares-mcp.service'
-    - 'systemctl restart lares.service'
+    - '/usr/bin/systemctl restart lares-mcp.service'
+    - '/usr/bin/systemctl restart lares.service'
     See setup-sudoers.sh for configuration.
 
     Returns:
@@ -53,8 +53,13 @@ async def restart_lares() -> str:
         #
         # We restart MCP first (quick), then Lares main service.
         # Using shell=True to chain commands properly.
+        # NOTE: Must use full path /usr/bin/systemctl to match sudoers config!
+        restart_cmd = (
+            "sudo /usr/bin/systemctl restart lares-mcp.service; "
+            "sudo /usr/bin/systemctl restart lares.service"
+        )
         subprocess.Popen(
-            "sudo systemctl restart lares-mcp.service; sudo systemctl restart lares.service",
+            restart_cmd,
             shell=True,
             start_new_session=True,
             stdout=subprocess.DEVNULL,
@@ -82,7 +87,7 @@ async def restart_mcp() -> str:
 
     This is faster than a full restart since Lares main bot stays running.
 
-    Requires passwordless sudo access for 'systemctl restart lares-mcp.service'.
+    Requires passwordless sudo access for '/usr/bin/systemctl restart lares-mcp.service'.
     See setup-sudoers.sh for configuration.
 
     Returns:
@@ -93,8 +98,9 @@ async def restart_mcp() -> str:
     mcp_url = os.getenv("LARES_MCP_URL", "http://localhost:8765")
 
     try:
+        # NOTE: Must use full path /usr/bin/systemctl to match sudoers config!
         result = subprocess.run(
-            ["sudo", "systemctl", "restart", "lares-mcp.service"],
+            ["sudo", "/usr/bin/systemctl", "restart", "lares-mcp.service"],
             capture_output=True,
             text=True,
             timeout=30,

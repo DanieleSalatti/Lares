@@ -56,33 +56,52 @@ async def graph_search_nodes(
     query: str,
     limit: int = 10,
     source: str | None = None,
+    weight_boost: float = 0.3,
 ) -> str:
-    """Search memory nodes by content.
+    """Search memory nodes by content with weight-aware ranking.
+
+    Combines text matching with graph connectivity - well-connected
+    nodes rank higher. Also strengthens edges between co-accessed
+    nodes (Hebbian learning).
 
     Args:
         query: Text to search for
         limit: Maximum results to return
         source: Optional filter by source type
+        weight_boost: How much to favor connected nodes (0.0-1.0)
+                     0.0 = pure recency, 1.0 = heavily favor connections
+                     Default 0.3 = balanced
 
     Returns:
-        Matching nodes or error message
+        Matching nodes with scores, or error message
     """
     try:
         provider = await _get_graph_memory_provider()
-        nodes = await provider.search_memory_nodes(query, limit, source)
+        nodes = await provider.search_memory_nodes_weighted(
+            query, limit, source, weight_boost
+        )
         await provider.shutdown()
 
         if not nodes:
             return f"No nodes found matching: {query}"
 
-        lines = [f"🧠 Graph nodes matching '{query}':", ""]
+        lines = [f"🧠 Graph search for '{query}' (weight_boost={weight_boost}):", ""]
         for node in nodes:
-            tags_str = ", ".join(node.get("tags", [])) if node.get("tags") else "none"
+            tags_str = (
+                ", ".join(node.get("tags", [])) if node.get("tags") else "none"
+            )
             lines.append(f"**{node['id'][:8]}...** ({node['source']})")
+            # Show scores
+            score_info = (
+                f"score: {node['final_score']:.2f} "
+                f"(graph: {node['graph_score']:.2f}, "
+                f"recency: {node['recency_rank']:.2f})"
+            )
+            lines.append(f"  {score_info}")
             if node.get("summary"):
                 lines.append(f"  Summary: {node['summary']}")
-            lines.append(f"  Content: {node['content'][:150]}...")
-            lines.append(f"  Tags: {tags_str} | Accessed: {node['access_count']}x")
+            lines.append(f"  Content: {node['content'][:120]}...")
+            lines.append(f"  Tags: {tags_str}")
             lines.append("")
 
         return "\n".join(lines)
@@ -244,3 +263,66 @@ async def graph_stats() -> str:
         return "\n".join(lines)
     except Exception as e:
         return f"Error getting stats: {e}"
+
+
+async def graph_decay_edges(decay_rate: float = 0.05, floor: float = 0.1) -> str:
+    """Apply Hebbian decay to edge weights.
+
+    Edges that haven't been strengthened recently will weaken.
+    Run this periodically (e.g., nightly) to simulate memory forgetting.
+
+    Args:
+        decay_rate: Fraction to decay (0.05 = 5% per call)
+        floor: Minimum weight (default 0.1, edges never fully disappear)
+
+    Returns:
+        Stats about the decay operation
+    """
+    memory = await _get_graph_memory_provider()
+    result = await memory.decay_edges(decay_rate=decay_rate, floor=floor)
+
+    return f"""🧠 Edge Decay Applied:
+
+  Edges: {result['edge_count']}
+  Decay rate: {result['decay_rate']*100:.1f}%
+  Floor: {result['floor']}
+
+  Before avg weight: {result['before_avg_weight']:.3f}
+  After avg weight: {result['after_avg_weight']:.3f}
+  Change: {result['after_avg_weight'] - result['before_avg_weight']:+.3f}
+"""
+
+
+async def graph_node_connectivity(node_id: str) -> str:
+    """Get connectivity statistics for a memory node.
+
+    Shows incoming/outgoing edge counts and weights.
+
+    Args:
+        node_id: The node ID to check
+
+    Returns:
+        Connectivity stats or error message
+    """
+    try:
+        provider = await _get_graph_memory_provider()
+        stats = await provider.get_node_connectivity(node_id)
+        await provider.shutdown()
+
+        incoming = stats["incoming"]
+        outgoing = stats["outgoing"]
+
+        return f"""📊 Connectivity for {node_id[:8]}...
+
+Incoming edges: {incoming['count']}
+  Total weight: {incoming['total_weight']:.3f}
+  Avg weight: {incoming['avg_weight']:.3f}
+
+Outgoing edges: {outgoing['count']}
+  Total weight: {outgoing['total_weight']:.3f}
+  Avg weight: {outgoing['avg_weight']:.3f}
+
+Graph score: {stats['graph_score']:.3f}
+"""
+    except Exception as e:
+        return f"Error getting connectivity: {e}"

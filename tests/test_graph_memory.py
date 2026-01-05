@@ -388,3 +388,200 @@ async def test_nodes_by_source_in_stats(provider):
     assert "nodes_by_source" in stats
     assert stats["nodes_by_source"]["conversation"] == 2
     assert stats["nodes_by_source"]["research"] == 1
+
+
+@pytest.mark.asyncio
+async def test_decay_edges(provider):
+    """Test Hebbian decay reduces edge weights."""
+    # Create two nodes and an edge
+    node1 = await provider.create_memory_node("Node A", source="test")
+    node2 = await provider.create_memory_node("Node B", source="test")
+    await provider.create_memory_edge(node1, node2, initial_weight=1.0)
+
+    # Decay with 10% rate
+    result = await provider.decay_edges(decay_rate=0.1, floor=0.1)
+
+    assert result["edge_count"] == 1
+    assert result["decay_rate"] == 0.1
+    assert result["floor"] == 0.1
+    assert result["before_avg_weight"] == 1.0
+    assert result["after_avg_weight"] == 0.9  # 1.0 * 0.9 = 0.9
+
+
+@pytest.mark.asyncio
+async def test_decay_respects_floor(provider):
+    """Test that decay doesn't go below floor."""
+    # Create edge with low weight
+    node1 = await provider.create_memory_node("Node A", source="test")
+    node2 = await provider.create_memory_node("Node B", source="test")
+    await provider.create_memory_edge(node1, node2, initial_weight=0.15)
+
+    # Decay with large rate but floor of 0.1
+    result = await provider.decay_edges(decay_rate=0.5, floor=0.1)
+
+    # 0.15 * 0.5 = 0.075, but floor is 0.1
+    assert result["after_avg_weight"] == 0.1
+
+
+@pytest.mark.asyncio
+async def test_strengthen_co_accessed_edges():
+    """Test that co-accessed nodes have their edges strengthened."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        db_path = os.path.join(tmpdir, "test.db")
+        provider = SqliteGraphMemoryProvider(db_path=db_path)
+        await provider.initialize()
+
+        # Create three related nodes
+        node1 = await provider.create_memory_node("restart capability", source="perch_tick")
+        node2 = await provider.create_memory_node("restart awareness", source="perch_tick")
+        node3 = await provider.create_memory_node("restart command", source="perch_tick")
+
+        # Create edges with initial weight 0.5
+        await provider.create_memory_edge(node1, node2, initial_weight=0.5)
+        await provider.create_memory_edge(node2, node3, initial_weight=0.5)
+
+        # Strengthen co-accessed edges (simulate search result)
+        strengthened = await provider.strengthen_co_accessed_edges([node1, node2, node3])
+        
+        # Should have strengthened existing edges
+        assert strengthened >= 2  # At least 2 edges existed
+        
+        # Check weight increased
+        connected = await provider.get_connected_nodes(node1)
+        for conn in connected:
+            if conn["id"] == node2:
+                assert conn["weight"] > 0.5  # Should be strengthened
+        
+        await provider.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_search_auto_strengthens_edges():
+    """Test that searching auto-strengthens edges between found nodes."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        db_path = os.path.join(tmpdir, "test.db")
+        provider = SqliteGraphMemoryProvider(db_path=db_path)
+        await provider.initialize()
+
+        # Create nodes that will match "memory"
+        node1 = await provider.create_memory_node("memory graph design", source="research")
+        node2 = await provider.create_memory_node("memory decay patterns", source="research")
+        
+        # Create an edge between them
+        await provider.create_memory_edge(node1, node2, initial_weight=0.3)
+        
+        # Search (should strengthen the edge)
+        results = await provider.search_memory_nodes("memory")
+        assert len(results) == 2
+        
+        # Check edge was strengthened
+        connected = await provider.get_connected_nodes(node1)
+        for conn in connected:
+            if conn["id"] == node2:
+                assert conn["weight"] > 0.3  # Was 0.3, should be ~0.32
+        
+        await provider.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_search_weighted_basic(provider):
+    """Test weighted search returns results with scores."""
+    # Create nodes
+    node1 = await provider.create_memory_node(
+        content="Python programming language",
+        source="test",
+        summary="Python basics",
+    )
+    node2 = await provider.create_memory_node(
+        content="Python data science",
+        source="test",
+        summary="Data science with Python",
+    )
+
+    # Search without any edges - should still work
+    results = await provider.search_memory_nodes_weighted("Python", limit=5)
+
+    assert len(results) == 2
+    assert all("final_score" in r for r in results)
+    assert all("graph_score" in r for r in results)
+    assert all("recency_rank" in r for r in results)
+
+
+@pytest.mark.asyncio
+async def test_search_weighted_boosts_connected(provider):
+    """Test that connected nodes get boosted in weighted search."""
+    # Create nodes
+    important = await provider.create_memory_node(
+        content="Important Python memory",
+        source="test",
+    )
+    isolated = await provider.create_memory_node(
+        content="Isolated Python memory",
+        source="test",
+    )
+    connector = await provider.create_memory_node(
+        content="Connector node",
+        source="test",
+    )
+
+    # Make 'important' well-connected
+    await provider.create_memory_edge(connector, important, initial_weight=0.9)
+    await provider.create_memory_edge(important, connector, initial_weight=0.8)
+
+    # Search with high weight boost
+    results = await provider.search_memory_nodes_weighted(
+        "Python", limit=5, weight_boost=0.8
+    )
+
+    # Important node should rank higher due to connections
+    python_results = [r for r in results if "Python" in r["content"]]
+    assert len(python_results) == 2
+
+    # Find which one has higher score
+    important_result = next(r for r in python_results if r["id"] == important)
+    isolated_result = next(r for r in python_results if r["id"] == isolated)
+
+    assert important_result["graph_score"] > isolated_result["graph_score"]
+
+
+@pytest.mark.asyncio
+async def test_get_node_connectivity(provider):
+    """Test getting connectivity stats for a node."""
+    # Create a hub node
+    hub = await provider.create_memory_node(content="Hub node", source="test")
+    spoke1 = await provider.create_memory_node(content="Spoke 1", source="test")
+    spoke2 = await provider.create_memory_node(content="Spoke 2", source="test")
+
+    # Connect spokes to hub
+    await provider.create_memory_edge(spoke1, hub, initial_weight=0.7)
+    await provider.create_memory_edge(spoke2, hub, initial_weight=0.5)
+    await provider.create_memory_edge(hub, spoke1, initial_weight=0.3)
+
+    stats = await provider.get_node_connectivity(hub)
+
+    assert stats["incoming"]["count"] == 2
+    assert stats["incoming"]["total_weight"] == pytest.approx(1.2, rel=0.01)
+    assert stats["outgoing"]["count"] == 1
+    assert stats["outgoing"]["total_weight"] == pytest.approx(0.3, rel=0.01)
+    assert stats["graph_score"] > 0
+
+
+@pytest.mark.asyncio
+async def test_weight_boost_zero_is_recency(provider):
+    """Test that weight_boost=0 falls back to pure recency ordering."""
+    # Create nodes in order
+    old = await provider.create_memory_node(content="Old Python", source="test")
+    new = await provider.create_memory_node(content="New Python", source="test")
+
+    # Make old one highly connected
+    connector = await provider.create_memory_node(content="Connector", source="test")
+    await provider.create_memory_edge(connector, old, initial_weight=0.9)
+    await provider.create_memory_edge(old, connector, initial_weight=0.9)
+
+    # With weight_boost=0, newer should still be first
+    results = await provider.search_memory_nodes_weighted(
+        "Python", limit=5, weight_boost=0.0
+    )
+
+    python_results = [r for r in results if "Python" in r["content"]]
+    assert python_results[0]["id"] == new  # Newer is first with 0 boost
