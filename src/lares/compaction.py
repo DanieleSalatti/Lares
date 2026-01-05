@@ -89,9 +89,17 @@ Summary:"""
         config = _get_config()
         self.memory = memory
         self.llm = llm
-        self.context_limit = context_limit if context_limit is not None else config.context_limit
-        self.compact_threshold = compact_threshold if compact_threshold is not None else config.compact_threshold
-        self.target_ratio = target_ratio if target_ratio is not None else config.target_after_compact
+        self.context_limit = (
+            context_limit if context_limit is not None else config.context_limit
+        )
+        self.compact_threshold = (
+            compact_threshold
+            if compact_threshold is not None
+            else config.compact_threshold
+        )
+        self.target_ratio = (
+            target_ratio if target_ratio is not None else config.target_after_compact
+        )
 
     async def needs_compaction(self) -> bool:
         """Check if compaction is needed based on current context size."""
@@ -203,7 +211,7 @@ Summary:"""
             role = msg.get("role", "unknown").upper()
             content = msg.get("content", "")
             lines.append(f"{role}: {content}")
-        return "\n\n".join(lines)
+        return "\\n\\n".join(lines)
 
     async def _delete_old_messages(self, count: int) -> int:
         """Delete the oldest N messages."""

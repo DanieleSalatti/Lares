@@ -16,6 +16,7 @@ import structlog
 from lares.config import load_config
 from lares.orchestrator_factory import create_orchestrator
 from lares.response_parser import parse_response
+from lares.restart_tracker import get_restart_context, record_startup
 from lares.scheduler import get_scheduler
 from lares.sse_consumer import (
     ApprovalResultEvent,
@@ -168,6 +169,7 @@ class LaresCore:
         discord: DiscordClient,
         mcp_url: str,
         orchestrator,
+        restart_context: str | None = None,
     ):
         self.config = config
         self.discord = discord
@@ -176,6 +178,8 @@ class LaresCore:
         self.approval_manager = ApprovalManager(mcp_url, discord)
         self._current_message_id: int | None = None
         self._seen_events: set[str] = set()
+        self._restart_context = restart_context
+        self._restart_context_sent = False
 
     async def handle_message(self, event: DiscordMessageEvent) -> None:
         """Process a Discord message through Orchestrator."""
@@ -195,6 +199,11 @@ class LaresCore:
             f"Current time: {current_time}\n\n"
             f"[Discord message from {event.author_name}]: {event.content}"
         )
+
+        # Inject restart context if this is first message after restart
+        if self._restart_context and not self._restart_context_sent:
+            formatted = f"{self._restart_context}\n\n{formatted}"
+            self._restart_context_sent = True
 
         try:
             await self._process_with_orchestrator(formatted)
@@ -333,6 +342,11 @@ Take a moment to:
 
 What would you like to do?"""
 
+        # Inject restart context if this is first tick after restart
+        if self._restart_context and not self._restart_context_sent:
+            perch_prompt = f"{self._restart_context}\n\n{perch_prompt}"
+            self._restart_context_sent = True
+
         try:
             result = await self.orchestrator.process_message(perch_prompt)
 
@@ -388,6 +402,12 @@ async def run() -> None:
         print(f"Configuration error: {e}")
         sys.exit(1)
 
+
+    # Record startup and get restart context
+    startup_info = record_startup(reason="normal")
+    restart_context = get_restart_context(startup_info)
+    if restart_context:
+        log.info("restart_detected", context=restart_context)
     mcp_url = os.getenv("LARES_MCP_URL", "http://localhost:8765")
     log.info("mcp_config", url=mcp_url)
 
@@ -399,7 +419,7 @@ async def run() -> None:
         mcp_url=mcp_url,
     )
 
-    core = LaresCore(config, discord, mcp_url, orchestrator)
+    core = LaresCore(config, discord, mcp_url, orchestrator, restart_context=restart_context)
 
     scheduler = get_scheduler()
     scheduler.set_callback(core.handle_scheduled_job)
@@ -416,10 +436,14 @@ async def run() -> None:
     consumer.on_approval_result(core.handle_approval_result)
     consumer.on_scheduler_changed(handle_scheduler_changed)
 
+    startup_msg = "🏛️ Lares online (MCP mode)"
+    if restart_context:
+        startup_msg += " [restarted]"
+
     log.info("lares_online")
 
     for attempt in range(5):
-        result = await discord.send_message("🏛️ Lares online (MCP mode)")
+        result = await discord.send_message(startup_msg)
         if result.get("status") == "ok":
             break
         log.warning("startup_message_failed", attempt=attempt + 1, result=result)

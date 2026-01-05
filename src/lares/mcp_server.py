@@ -282,6 +282,18 @@ NO_APPROVAL_TOOLS = {
     "graph_get_connected",
     "graph_traverse",
     "graph_stats",
+    # Home Assistant tools - reversible actions
+    "ha_turn_on",
+    "ha_turn_off",
+    "ha_get_state",
+    "ha_list_entities",
+    "ha_set_light_brightness",
+    # System management tools - reversible actions
+    "restart_lares",
+    "restart_mcp",
+    # Graph memory tools that modify data autonomously
+    "graph_decay_edges",
+    "graph_node_connectivity",
 }
 
 
@@ -1244,15 +1256,22 @@ async def graph_search_nodes(
     query: str,
     limit: int = 10,
     source: str | None = None,
+    weight_boost: float = 0.3,
 ) -> str:
-    """Search memory nodes by content.
+    """Search memory nodes by content with weight-aware ranking.
+
+    Combines text matching with graph connectivity - well-connected
+    nodes rank higher. Also strengthens edges between co-accessed
+    nodes (Hebbian learning).
 
     Args:
         query: Text to search for
         limit: Maximum results to return
         source: Optional filter by source type
+        weight_boost: How much to favor connected nodes (0.0-1.0)
+                     0.0 = pure recency, 1.0 = heavily favor connections
     """
-    return await mcp_graph_tools.graph_search_nodes(query, limit, source)
+    return await mcp_graph_tools.graph_search_nodes(query, limit, source, weight_boost)
 
 
 @mcp.tool()
@@ -1317,6 +1336,19 @@ async def graph_stats() -> str:
     return await mcp_graph_tools.graph_stats()
 
 
+@mcp.tool()
+async def graph_decay_edges(decay_rate: float = 0.05, floor: float = 0.1) -> str:
+    """Apply Hebbian decay to edge weights.
+
+    Edges that haven't been strengthened recently will weaken.
+    Run this periodically (e.g., nightly) to simulate memory forgetting.
+
+    Args:
+        decay_rate: Fraction to decay (0.05 = 5% per call)
+        floor: Minimum weight (default 0.1, edges never fully disappear)
+    """
+    return await mcp_graph_tools.graph_decay_edges(decay_rate, floor)
+
 
 
 @mcp.tool()
@@ -1357,7 +1389,113 @@ def schedule_list_jobs() -> str:
     return scheduler.list_jobs()
 
 
+
+# === HOME ASSISTANT TOOLS ===
+
+
+@mcp.tool()
+async def ha_turn_on(entity_id: str) -> str:
+    """Turn on a Home Assistant entity (light, switch, etc.).
+
+    Args:
+        entity_id: The entity ID to turn on (e.g., "light.living_room", "switch.fan")
+    """
+    from lares.tools.home_assistant import ha_turn_on as _ha_turn_on
+
+    result = await _ha_turn_on(entity_id)
+    return result.message
+
+
+@mcp.tool()
+async def ha_turn_off(entity_id: str) -> str:
+    """Turn off a Home Assistant entity (light, switch, etc.).
+
+    Args:
+        entity_id: The entity ID to turn off (e.g., "light.living_room", "switch.fan")
+    """
+    from lares.tools.home_assistant import ha_turn_off as _ha_turn_off
+
+    result = await _ha_turn_off(entity_id)
+    return result.message
+
+
+@mcp.tool()
+async def ha_get_state(entity_id: str) -> str:
+    """Get the current state of a Home Assistant entity.
+
+    Args:
+        entity_id: The entity ID to query (e.g., "light.living_room", "sensor.temperature")
+    """
+    from lares.tools.home_assistant import ha_get_state as _ha_get_state
+
+    result = await _ha_get_state(entity_id)
+    return result.message
+
+
+@mcp.tool()
+async def ha_list_entities(domain: str | None = None) -> str:
+    """List available Home Assistant entities, optionally filtered by domain.
+
+    Args:
+        domain: Optional domain filter (e.g., "light", "switch", "sensor")
+    """
+    from lares.tools.home_assistant import ha_list_entities as _ha_list_entities
+
+    result = await _ha_list_entities(domain)
+    return result.message
+
+
+@mcp.tool()
+async def ha_set_light_brightness(entity_id: str, brightness: int) -> str:
+    """Set the brightness of a light entity.
+
+    Args:
+        entity_id: The light entity ID (e.g., "light.living_room")
+        brightness: Brightness level 0-255 (0=off, 255=full brightness)
+    """
+    from lares.tools.home_assistant import ha_set_light_brightness as _ha_set_brightness
+
+    result = await _ha_set_brightness(entity_id, brightness)
+    return result.message
+
+
 # === ENTRY POINT ===
+
+
+# === SYSTEM MANAGEMENT TOOLS ===
+
+
+@mcp.tool()
+async def restart_lares() -> str:
+    """Restart both Lares services (MCP server and main bot).
+
+    Use this when:
+    - Applying code updates after git pull
+    - Reloading configuration changes
+    - Recovering from suspected issues
+
+    Requires passwordless sudo for systemctl restart.
+    """
+    from lares.tools.system_management import restart_lares as _restart_lares
+
+    return await _restart_lares()
+
+
+@mcp.tool()
+async def restart_mcp() -> str:
+    """Restart only the Lares MCP server (not the main bot).
+
+    Use this when:
+    - New MCP tools have been added
+    - MCP server configuration changed
+    - MCP server is having issues
+
+    Faster than full restart since main bot stays running.
+    """
+    from lares.tools.system_management import restart_mcp as _restart_mcp
+
+    return await _restart_mcp()
+
 
 
 async def run_with_discord():
@@ -1406,6 +1544,20 @@ async def run_with_discord():
         if _discord_bot:
             await _discord_bot.close()
         print("Shutdown complete.")
+
+
+
+@mcp.tool()
+async def graph_node_connectivity(node_id: str) -> str:
+    """Get connectivity statistics for a memory node.
+
+    Shows incoming/outgoing edge counts and weights - useful for
+    understanding how well-connected a memory is.
+
+    Args:
+        node_id: The node ID to check
+    """
+    return await mcp_graph_tools.graph_node_connectivity(node_id)
 
 
 if __name__ == "__main__":
