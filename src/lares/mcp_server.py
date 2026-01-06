@@ -23,15 +23,11 @@ Discord endpoints:
 
 import asyncio
 import json
-import os
 import subprocess
 import urllib.error
 import urllib.request
 from datetime import UTC, datetime
 from pathlib import Path
-
-from dotenv import load_dotenv
-load_dotenv()
 
 import discord
 from discord.ext import commands
@@ -40,41 +36,36 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse, StreamingResponse
 
 from lares import mcp_graph_tools
+from lares.config import (
+    load_bluesky_config,
+    load_discord_config,
+    load_mcp_config,
+    load_paths_config,
+)
 from lares.mcp_approval import get_queue
 from lares.scheduler import get_scheduler
+
+_paths_config = load_paths_config()
+_discord_config = load_discord_config()
+_bluesky_config = load_bluesky_config()
+_mcp_config = load_mcp_config()
 
 # Initialize MCP server
 mcp = FastMCP(
     name="lares-tools",
     instructions="Lares household AI tools - shell, files, RSS, BlueSky, Obsidian",
-    host="0.0.0.0",
-    port=8765,
+    host=_mcp_config.host,
+    port=_mcp_config.port,
 )
 
-# Configuration
-LARES_PROJECT = Path(os.getenv("LARES_PROJECT_PATH", "/home/daniele/workspace/lares"))
-OBSIDIAN_VAULT = Path(
-    os.getenv("OBSIDIAN_VAULT_PATH", "/home/daniele/workspace/gitlab/daniele/appunti")
-)
+# Configuration from config module
+LARES_PROJECT = _paths_config.project_path
+OBSIDIAN_VAULT = _paths_config.obsidian_vault
+ALLOWED_DIRECTORIES = _paths_config.allowed_directories
+APPROVAL_DB = _paths_config.approval_db
 
-
-# Load allowed directories from environment
-def _load_allowed_directories() -> list[Path]:
-    """Load allowed directories from LARES_ALLOWED_PATHS env var, with fallback to defaults."""
-    allowed_paths = os.getenv("LARES_ALLOWED_PATHS", "")
-    if allowed_paths:
-        return [Path(p.strip()) for p in allowed_paths.split(":") if p.strip()]
-    else:
-        return [LARES_PROJECT, OBSIDIAN_VAULT]
-
-
-ALLOWED_DIRECTORIES = _load_allowed_directories()
-APPROVAL_DB = Path(
-    os.getenv("LARES_APPROVAL_DB", "/home/daniele/workspace/lares/data/approvals.db")
-)
-
-BSKY_PUBLIC_API = "https://public.api.bsky.app/xrpc"
-BSKY_AUTH_API = "https://bsky.social/xrpc"
+BSKY_PUBLIC_API = _bluesky_config.public_api
+BSKY_AUTH_API = _bluesky_config.auth_api
 _bsky_session_cache: dict = {}
 
 # Initialize approval queue
@@ -83,9 +74,9 @@ approval_queue = get_queue(APPROVAL_DB)
 # === DISCORD INTEGRATION ===
 
 # Discord configuration
-DISCORD_TOKEN = os.getenv("DISCORD_BOT_TOKEN", "")
-DISCORD_CHANNEL_ID = int(os.getenv("DISCORD_CHANNEL_ID", "0"))
-DISCORD_ENABLED = bool(DISCORD_TOKEN and DISCORD_CHANNEL_ID)
+DISCORD_TOKEN = _discord_config.bot_token or ""
+DISCORD_CHANNEL_ID = _discord_config.channel_id or 0
+DISCORD_ENABLED = _discord_config.enabled
 
 # Event queues for SSE clients (Lares Core connects here)
 _event_queues: list[asyncio.Queue] = []
@@ -208,7 +199,7 @@ SHELL_ALLOWLIST = [
     "which ",  # System info
 ]
 # Set to True to require approval for all shell commands
-SHELL_REQUIRE_ALL_APPROVAL = os.getenv("MCP_SHELL_REQUIRE_APPROVAL", "").lower() == "true"
+SHELL_REQUIRE_ALL_APPROVAL = _mcp_config.shell_require_all_approval
 
 
 # === HELPER FUNCTIONS ===
@@ -232,11 +223,11 @@ def _get_bsky_auth_token() -> str | None:
     if "access_jwt" in _bsky_session_cache:
         return _bsky_session_cache["access_jwt"]
 
-    handle = os.getenv("BLUESKY_HANDLE")
-    password = os.getenv("BLUESKY_APP_PASSWORD")
-
-    if not handle or not password:
+    if not _bluesky_config.enabled:
         return None
+
+    handle = _bluesky_config.handle
+    password = _bluesky_config.app_password
 
     try:
         auth_url = f"{BSKY_AUTH_API}/com.atproto.server.createSession"

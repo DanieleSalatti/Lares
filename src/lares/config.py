@@ -13,8 +13,13 @@ load_dotenv()
 class DiscordConfig:
     """Discord bot configuration."""
 
-    bot_token: str
-    channel_id: int
+    bot_token: str | None
+    channel_id: int | None
+
+    @property
+    def enabled(self) -> bool:
+        """Check if Discord is configured and enabled."""
+        return bool(self.bot_token and self.channel_id)
 
 
 @dataclass
@@ -93,18 +98,7 @@ def load_config(env_path: Path | None = None) -> Config:
     if env_path:
         load_dotenv(env_path, override=True)
 
-    discord_token = os.getenv("DISCORD_BOT_TOKEN")
-    if not discord_token:
-        raise ValueError("DISCORD_BOT_TOKEN is required")
-
-    channel_id_str = os.getenv("DISCORD_CHANNEL_ID")
-    if not channel_id_str:
-        raise ValueError("DISCORD_CHANNEL_ID is required")
-
-    discord_config = DiscordConfig(
-        bot_token=discord_token,
-        channel_id=int(channel_id_str),
-    )
+    discord_config = load_discord_config()
 
     user_config = UserConfig(
         timezone=os.getenv("USER_TIMEZONE", "America/Los_Angeles"),
@@ -157,6 +151,40 @@ class MemoryConfig:
     chars_per_token: int = 4
 
 
+@dataclass
+class PathsConfig:
+    """Path configuration for Lares."""
+
+    project_path: Path
+    obsidian_vault: Path
+    allowed_directories: list[Path]
+    approval_db: Path
+
+
+@dataclass
+class BlueskyConfig:
+    """BlueSky API configuration."""
+
+    handle: str | None
+    app_password: str | None
+    public_api: str = "https://public.api.bsky.app/xrpc"
+    auth_api: str = "https://bsky.social/xrpc"
+
+    @property
+    def enabled(self) -> bool:
+        """Check if BlueSky auth is configured."""
+        return bool(self.handle and self.app_password)
+
+
+@dataclass
+class McpConfig:
+    """MCP server configuration."""
+
+    host: str = "0.0.0.0"
+    port: int = 8765
+    shell_require_all_approval: bool = False
+
+
 def load_memory_config() -> MemoryConfig:
     """Load memory configuration from environment variables."""
     return MemoryConfig(
@@ -165,4 +193,59 @@ def load_memory_config() -> MemoryConfig:
         compact_threshold=float(os.getenv("COMPACT_THRESHOLD", "0.70")),
         target_after_compact=float(os.getenv("TARGET_AFTER_COMPACT", "0.25")),
         chars_per_token=int(os.getenv("CHARS_PER_TOKEN", "4")),
+    )
+
+
+def load_discord_config() -> DiscordConfig:
+    """Load Discord configuration (gracefully handles missing values)."""
+    bot_token = os.getenv("DISCORD_BOT_TOKEN") or None
+    channel_id_str = os.getenv("DISCORD_CHANNEL_ID")
+    channel_id = int(channel_id_str) if channel_id_str else None
+    return DiscordConfig(bot_token=bot_token, channel_id=channel_id)
+
+
+def load_paths_config() -> PathsConfig:
+    """Load paths configuration from environment variables."""
+    project_path = Path(
+        os.getenv("LARES_PROJECT_PATH", "/home/daniele/workspace/lares")
+    )
+    obsidian_vault = Path(
+        os.getenv("OBSIDIAN_VAULT_PATH", "/home/daniele/workspace/gitlab/daniele/appunti")
+    )
+    approval_db = Path(
+        os.getenv("LARES_APPROVAL_DB", "/home/daniele/workspace/lares/data/approvals.db")
+    )
+
+    allowed_paths_str = os.getenv("LARES_ALLOWED_PATHS", "")
+    if allowed_paths_str:
+        allowed_directories = [
+            Path(p.strip()) for p in allowed_paths_str.split(":") if p.strip()
+        ]
+    else:
+        allowed_directories = [project_path, obsidian_vault]
+
+    return PathsConfig(
+        project_path=project_path,
+        obsidian_vault=obsidian_vault,
+        allowed_directories=allowed_directories,
+        approval_db=approval_db,
+    )
+
+
+def load_bluesky_config() -> BlueskyConfig:
+    """Load BlueSky configuration from environment variables."""
+    return BlueskyConfig(
+        handle=os.getenv("BLUESKY_HANDLE") or None,
+        app_password=os.getenv("BLUESKY_APP_PASSWORD") or None,
+    )
+
+
+def load_mcp_config() -> McpConfig:
+    """Load MCP server configuration from environment variables."""
+    return McpConfig(
+        host=os.getenv("MCP_HOST", "0.0.0.0"),
+        port=int(os.getenv("MCP_PORT", "8765")),
+        shell_require_all_approval=os.getenv(
+            "MCP_SHELL_REQUIRE_APPROVAL", ""
+        ).lower() == "true",
     )

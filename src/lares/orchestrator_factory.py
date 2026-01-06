@@ -41,9 +41,14 @@ async def create_memory_provider(
     if memory_provider_type != "sqlite":
         raise ValueError(f"Unsupported memory provider: {memory_provider_type}")
 
-    path = sqlite_path or os.getenv("SQLITE_DB_PATH") or "data/lares.db"
+    memory_config = load_memory_config()
+    path = sqlite_path or memory_config.sqlite_path
     instructions = _load_base_instructions()
-    memory = SqliteMemoryProvider(db_path=path, base_instructions=instructions)
+    memory = SqliteMemoryProvider(
+        db_path=path,
+        base_instructions=instructions,
+        chars_per_token=memory_config.chars_per_token,
+    )
     await memory.initialize()
     return memory
 
@@ -84,9 +89,13 @@ async def create_orchestrator(
     await llm.initialize()
     llm_model = llm.model
 
-    path = memory_config.sqlite_path or os.getenv("SQLITE_DB_PATH", "data/lares.db")
+    path = memory_config.sqlite_path
     instructions = _load_base_instructions()
-    memory = SqliteMemoryProvider(db_path=path, base_instructions=instructions)
+    memory = SqliteMemoryProvider(
+        db_path=path,
+        base_instructions=instructions,
+        chars_per_token=memory_config.chars_per_token,
+    )
     await memory.initialize()
     log.info("memory_provider_created", type="sqlite", path=path)
 

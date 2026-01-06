@@ -156,19 +156,33 @@ async def test_token_estimation_in_context(tmp_path):
 
 
 def test_estimate_tokens():
-    """Test the estimate_tokens helper function."""
-    from lares.providers.sqlite import estimate_tokens
+    """Test the _estimate_tokens method with default chars_per_token."""
+    from lares.providers.sqlite import SqliteMemoryProvider
+
+    provider = SqliteMemoryProvider()
 
     # Empty string = 0 tokens
-    assert estimate_tokens("") == 0
-    assert estimate_tokens(None) == 0  # type: ignore
+    assert provider._estimate_tokens("") == 0
 
-    # 4 chars = 1 token
-    assert estimate_tokens("test") == 1
+    # 4 chars = 1 token (default chars_per_token=4)
+    assert provider._estimate_tokens("test") == 1
 
     # 8 chars = 2 tokens
-    assert estimate_tokens("testtest") == 2
+    assert provider._estimate_tokens("testtest") == 2
 
     # Longer text
     text = "This is a longer piece of text to estimate tokens"
-    assert estimate_tokens(text) == len(text) // 4
+    assert provider._estimate_tokens(text) == len(text) // 4
+
+
+def test_estimate_tokens_custom_chars_per_token():
+    """Test _estimate_tokens with custom chars_per_token value."""
+    from lares.providers.sqlite import SqliteMemoryProvider
+
+    provider = SqliteMemoryProvider(chars_per_token=2)
+
+    # With chars_per_token=2, 4 chars = 2 tokens
+    assert provider._estimate_tokens("test") == 2
+
+    # 8 chars = 4 tokens
+    assert provider._estimate_tokens("testtest") == 4

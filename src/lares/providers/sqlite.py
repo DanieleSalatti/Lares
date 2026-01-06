@@ -15,15 +15,7 @@ from .memory import MemoryBlock, MemoryContext, MemoryProvider
 
 log = structlog.get_logger()
 
-# Approximate characters per token for Claude models
-CHARS_PER_TOKEN = 4
-
-
-def estimate_tokens(text: str) -> int:
-    """Estimate token count from text length."""
-    if not text:
-        return 0
-    return len(text) // CHARS_PER_TOKEN
+DEFAULT_CHARS_PER_TOKEN = 4
 
 
 class SqliteMemoryProvider(MemoryProvider):
@@ -32,15 +24,22 @@ class SqliteMemoryProvider(MemoryProvider):
     Stores messages, memory blocks, and summaries in a local SQLite database.
     """
 
-    def __init__(self, db_path: str = "data/lares.db", base_instructions: str = ""):
+    def __init__(
+        self,
+        db_path: str = "data/lares.db",
+        base_instructions: str = "",
+        chars_per_token: int = DEFAULT_CHARS_PER_TOKEN,
+    ):
         """Initialize the SQLite memory provider.
 
         Args:
             db_path: Path to the SQLite database file
             base_instructions: System prompt / base instructions for context
+            chars_per_token: Characters per token for estimation (default: 4)
         """
         self.db_path = Path(db_path)
         self.base_instructions = base_instructions
+        self.chars_per_token = chars_per_token
         self._db: aiosqlite.Connection | None = None
         self._session_id: str = str(uuid.uuid4())
 
@@ -136,6 +135,12 @@ class SqliteMemoryProvider(MemoryProvider):
             total_tokens=total_tokens,
         )
 
+    def _estimate_tokens(self, text: str) -> int:
+        """Estimate token count from text length."""
+        if not text:
+            return 0
+        return len(text) // self.chars_per_token
+
     def _estimate_context_tokens(
         self,
         blocks: list[MemoryBlock],
@@ -143,15 +148,15 @@ class SqliteMemoryProvider(MemoryProvider):
         summaries: list[str],
     ) -> int:
         """Estimate total tokens in context."""
-        total = estimate_tokens(self.base_instructions)
+        total = self._estimate_tokens(self.base_instructions)
         for block in blocks:
-            total += estimate_tokens(block.value)
-            total += estimate_tokens(block.description)
+            total += self._estimate_tokens(block.value)
+            total += self._estimate_tokens(block.description)
         for msg in messages:
-            total += estimate_tokens(msg.get("content", ""))
+            total += self._estimate_tokens(msg.get("content", ""))
             total += 4  # role overhead
         for summary in summaries:
-            total += estimate_tokens(summary)
+            total += self._estimate_tokens(summary)
         return total
 
     async def _get_memory_blocks(self) -> list[MemoryBlock]:

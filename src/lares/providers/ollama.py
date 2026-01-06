@@ -23,6 +23,7 @@ class OllamaLLMProvider(LLMProvider):
         self.base_url = base_url.rstrip("/")
         self._client: httpx.AsyncClient | None = None
         self._timeout = float(os.getenv("OLLAMA_TIMEOUT", "300"))
+        self._num_ctx = int(os.getenv("LARES_CONTEXT_WINDOW_LIMIT", "32768"))
 
     async def initialize(self) -> None:
         self._client = httpx.AsyncClient(timeout=self._timeout)
@@ -50,7 +51,7 @@ class OllamaLLMProvider(LLMProvider):
             "model": self.model,
             "messages": ollama_messages,
             "stream": False,
-            "options": {"num_predict": max_tokens},
+            "options": {"num_predict": max_tokens, "num_ctx": self._num_ctx},
         }
         if ollama_tools:
             payload["tools"] = ollama_tools

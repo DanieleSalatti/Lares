@@ -56,3 +56,12 @@ class LLMProvider(Provider):
             LLMResponse with content and/or tool calls
         """
         pass
+
+    async def complete(
+        self,
+        messages: list[dict[str, Any]],
+        system: str,
+        max_tokens: int = 4096,
+    ) -> LLMResponse:
+        """Simple completion without tools (used by compaction)."""
+        return await self.send(messages, system, tools=None, max_tokens=max_tokens)

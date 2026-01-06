@@ -13,9 +13,6 @@ Inspired by [Strix](https://timkellogg.me/blog/2025/12/15/strix), Lares is an am
 
 ## Features
 
-- **Dual Memory Modes**:
-  - **Letta Mode**: Uses [Letta](https://letta.com) for managed memory and conversation
-  - **Direct LLM Mode**: SQLite-based memory with direct Claude API integration
 - **Persistent Memory**: Long-term memory that survives restarts with automatic compaction
 - **Discord Interface**: Chat with Lares through Discord
 - **Memory Blocks**: Organized memory for identity, human preferences, state, and ideas
@@ -34,7 +31,6 @@ Inspired by [Strix](https://timkellogg.me/blog/2025/12/15/strix), Lares is an am
 - Python 3.11+
 - An LLM provider API key (Anthropic, OpenAI) or local Ollama installation
 - A Discord bot token
-- (Optional) A [Letta Cloud](https://app.letta.com) account for Letta mode
 
 ### Installation
 
@@ -72,15 +68,6 @@ cp .env.example .env
 #   Set OLLAMA_BASE_URL if not localhost:11434
 #   Set OLLAMA_MODEL for model choice (default: llama3.2)
 
-# Choose memory mode:
-# - USE_DIRECT_LLM=true: Use SQLite + Claude directly (recommended)
-# - USE_DIRECT_LLM=false: Use Letta for memory management
-# - MEMORY_PROVIDER=sqlite: SQLite memory (for direct mode)
-# - MEMORY_PROVIDER=letta: Letta memory (for Letta mode)
-
-# For Letta mode only:
-# - LETTA_API_KEY: From app.letta.com (or use LETTA_BASE_URL for self-hosted)
-
 # Optional integrations:
 # - BLUESKY_HANDLE: Your BlueSky handle (e.g., user.bsky.social)
 # - BLUESKY_APP_PASSWORD: App password from BlueSky settings
@@ -114,8 +101,6 @@ python run.py
 # or if installed: lares
 ```
 
-On first run, Lares will create a new agent and print an `LARES_AGENT_ID` - add this to your `.env` to persist the agent across restarts.
-
 #### Production Mode (systemd)
 
 For production deployment with auto-start on boot:
@@ -143,28 +128,10 @@ journalctl -u lares.service -n 50    # View last 50 log lines
 ```
 
 The systemd service:
-- Automatically starts Letta Docker container before Lares
 - Restarts on failure
 - Runs with proper virtual environment
 - Logs to systemd journal
 - Persists across reboots when enabled
-
-## Self-Hosting Letta
-
-You can run Letta locally with Docker:
-
-```bash
-docker run \
-  -v ~/.letta/.persist/pgdata:/var/lib/postgresql/data \
-  -p 8283:8283 \
-  -e ANTHROPIC_API_KEY="your_key" \
-  letta/letta:latest
-```
-
-Then set in your `.env`:
-```
-LETTA_BASE_URL=http://localhost:8283
-```
 
 ## Approval Workflows
 
@@ -280,24 +247,7 @@ src/lares/
 └── main.py               # Entry point (legacy Letta mode)
 ```
 
-### Dual Architecture: Letta vs Direct Mode
-
-Lares supports two operational modes:
-
-#### 1. Letta Mode (Legacy)
-- Uses Letta for both LLM orchestration and memory management
-- All conversation and tool execution handled by Letta
-- Memory compaction managed by Letta automatically
-- Configuration: `USE_DIRECT_LLM=false`, `MEMORY_PROVIDER=letta`
-
-#### 2. Direct LLM Mode (Recommended)
-- Direct integration with Claude API via Anthropic SDK
-- SQLite database for memory persistence
-- Custom orchestrator handles tool loop
-- Automatic memory compaction when approaching token limits
-- Configuration: `USE_DIRECT_LLM=true`, `MEMORY_PROVIDER=sqlite`
-
-### Data Flow in Direct Mode
+### Data Flow
 
 ```
 Discord Message → MCP Server (SSE) → LaresCore → Orchestrator
@@ -330,18 +280,6 @@ Swappable implementations for core functionality:
 - **SQLite Schema**: `messages`, `memory_blocks`, `summaries` tables
 - **Automatic Compaction**: Triggers at 70% of context limit (default 35k/50k tokens)
 - **Session Buffer**: Short-term memory within a conversation
-- **Migration Tool**: `scripts/migrate_letta_to_sqlite.py` for transitioning from Letta
-
-### Memory Compaction Recovery
-
-Lares gracefully handles Letta's automatic memory compaction when conversations exceed context limits:
-
-1. **Detection**: System alerts about memory constraints are automatically detected
-2. **Notification**: Shows "💭 *Reorganizing my thoughts...*" in Discord
-3. **Automatic Retry**: The interrupted operation is retried after compaction
-4. **Continuity**: Lares completes intended actions (especially important during perch time)
-
-This ensures Lares never gets "stunned" by memory compaction and maintains continuous operation.
 
 ### Memory Blocks
 
@@ -386,9 +324,8 @@ If you see frequent memory compaction:
 
 #### Tool Execution Not Working
 If tools appear as text like "[Tool-only response: ...]":
-1. Ensure `USE_DIRECT_LLM=true` for direct mode
-2. Restart the MCP server after configuration changes
-3. Check that `ANTHROPIC_API_KEY` is valid
+1. Restart the MCP server after configuration changes
+2. Check that `ANTHROPIC_API_KEY` is valid
 
 ### Available Tools
 
@@ -509,11 +446,4 @@ GET  /health                 - Health check
 
 Lares bridges this queue to Discord, allowing you to approve/deny via reactions.
 
-### Connecting Letta to MCP
-
-Lares automatically connects to the MCP server and attaches tools to the Letta agent. Configuration in `.env`:
-
-```
-LARES_MCP_URL=http://localhost:8765/sse
-```
 
